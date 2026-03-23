@@ -19,17 +19,20 @@ def _():
 
 
 @app.cell
-def _(Path, mo):
-    parquet_dir = Path("data/results_spiritualist/docling_ocr_gt_s_star")
+def _(Path, mo, pd):
+    ssu_csv = Path("data/results_spiritualist/spiritualist_gt_ssu_boxes.csv")
+    ocr_parquet_dir = Path("data/results_spiritualist/docling_ocr_gt_s_star")
     image_dir = Path("data/spiritualist/spiritualist_images")
     alto_dir = Path("data/spiritualist/ocr_gt_with_ssu")
-    pages = sorted(p.stem for p in parquet_dir.glob("*.parquet"))
+
+    _ssu_all = pd.read_csv(ssu_csv)
+    pages = sorted(_ssu_all["filename"].str.replace(r"\.\w+$", "", regex=True).unique())
 
     page_picker = mo.ui.dropdown(options=pages, value=pages[0], label="Page")
     show_lines = mo.ui.checkbox(label="Show line-level boxes", value=True)
     show_word_ssus = mo.ui.checkbox(label="Show word-unioned SSU boxes", value=False)
     mo.vstack([page_picker, show_lines, show_word_ssus])
-    return alto_dir, image_dir, page_picker, parquet_dir, show_lines, show_word_ssus
+    return alto_dir, image_dir, ocr_parquet_dir, page_picker, pages, show_lines, show_word_ssus, ssu_csv
 
 
 @app.cell
@@ -41,15 +44,28 @@ def _(
     alto_dir,
     image_dir,
     io,
+    ocr_parquet_dir,
     page_picker,
-    parquet_dir,
     pd,
     show_lines,
     show_word_ssus,
+    ssu_csv,
 ):
     """Load page data and render SSU boxes on a scaled copy of the image."""
     page = page_picker.value
-    df = pd.read_parquet(parquet_dir / f"{page}.parquet")
+
+    # SSU boundaries always come from the CSV (in sync with tagged XML)
+    _all = pd.read_csv(ssu_csv)
+    df = _all[_all["filename"] == f"{page}.jpg"].copy().reset_index(drop=True)
+
+    # Optionally join OCR text from parquet when available
+    _parquet_path = ocr_parquet_dir / f"{page}.parquet"
+    if _parquet_path.exists():
+        _ocr = pd.read_parquet(_parquet_path)[["ssu_id", "ocr_text"]].drop_duplicates("ssu_id")
+        df = df.merge(_ocr, on="ssu_id", how="left")
+        df["ocr_text"] = df["ocr_text"].fillna("")
+    else:
+        df["ocr_text"] = ""
 
     img = Image.open(image_dir / f"{page}.jpg").convert("RGB")
     draw = ImageDraw.Draw(img)
