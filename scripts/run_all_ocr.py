@@ -55,9 +55,10 @@ def main():
     parser.add_argument(
         "--ocr-models",
         nargs="+",
+        required=True,
         choices=ALL_MODELS,
-        default=ALL_MODELS,
-        help="OCR models to run (default: all)",
+        help="OCR models to run. Note: paddleocr is incompatible with pytorch-based models "
+             "(trocr, easyocr) at the CUDA level — run them in separate invocations.",
     )
     parser.add_argument(
         "--image-dir",
