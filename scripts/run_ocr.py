@@ -32,6 +32,7 @@ Usage:
 
 import argparse
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pandas as pd
@@ -88,26 +89,29 @@ def merge_parts(parts_dir: Path, output_path: Path) -> None:
     print(f"Merged {len(part_files)} parts ({len(df):,} rows) -> {output_path}")
 
 
+def prepare_crops(group_df: pd.DataFrame, image_dir: Path | None) -> list:
+    """Load image and crop all regions. Runs on a background thread for prefetching."""
+    img_path = resolve_image_path(str(group_df.iloc[0]["image_path"]), image_dir)
+    image = Image.open(img_path).convert("RGB")
+    rows = list(group_df.itertuples(index=False))
+    return [crop_region(image, row.x, row.y, row.width, row.height) for row in rows]
+
+
 def process_image_group(
     group_df: pd.DataFrame,
-    image_dir: Path | None,
+    crops: list,
     model: OCRModel,
     batch_size: int,
 ) -> pd.DataFrame:
-    img_path = resolve_image_path(str(group_df.iloc[0]["image_path"]), image_dir)
-    image = Image.open(img_path).convert("RGB")
-
-    rows = list(group_df.itertuples(index=False))
     ocr_texts: list[str] = []
 
-    for batch_start in range(0, len(rows), batch_size):
-        batch_rows = rows[batch_start : batch_start + batch_size]
-        crops = [crop_region(image, row.x, row.y, row.width, row.height) for row in batch_rows]
+    for batch_start in range(0, len(crops), batch_size):
+        batch_crops = crops[batch_start : batch_start + batch_size]
         try:
-            ocr_texts.extend(model.run_batch(crops))
+            ocr_texts.extend(model.run_batch(batch_crops))
         except Exception as e:
             print(f"  Warning: batch OCR failed ({e}), falling back to per-crop")
-            for crop in crops:
+            for crop in batch_crops:
                 try:
                     ocr_texts.append(model.run(crop))
                 except Exception:
@@ -189,15 +193,31 @@ def main():
     )
     print(f"Device: {args.device}  |  Model: {args.model}  |  Batch size: {args.batch_size}")
 
-    for filename in tqdm(remaining, desc="Images"):
-        group_df = df[df["filename"] == filename].copy()
-        try:
-            result_df = process_image_group(group_df, image_dir, model, args.batch_size)
-            result_df["ocr_model"] = args.model
-            part_path = parts_dir / f"{Path(filename).stem}.parquet"
-            result_df.to_parquet(part_path, index=False)
-        except Exception as e:
-            print(f"  Error processing {filename}: {e}")
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(prepare_crops, df[df["filename"] == remaining[0]].copy(), image_dir) if remaining else None
+
+        for i, filename in enumerate(tqdm(remaining, desc="Images")):
+            group_df = df[df["filename"] == filename].copy()
+
+            try:
+                crops = future.result()
+            except Exception as e:
+                print(f"  Error loading {filename}: {e}")
+                if i + 1 < len(remaining):
+                    future = executor.submit(prepare_crops, df[df["filename"] == remaining[i + 1]].copy(), image_dir)
+                continue
+
+            # Prefetch next image while GPU runs inference on current
+            if i + 1 < len(remaining):
+                future = executor.submit(prepare_crops, df[df["filename"] == remaining[i + 1]].copy(), image_dir)
+
+            try:
+                result_df = process_image_group(group_df, crops, model, args.batch_size)
+                result_df["ocr_model"] = args.model
+                part_path = parts_dir / f"{Path(filename).stem}.parquet"
+                result_df.to_parquet(part_path, index=False)
+            except Exception as e:
+                print(f"  Error processing {filename}: {e}")
 
     print(f"\nAll images processed. Merging into {output_path} ...")
     merge_parts(parts_dir, output_path)
