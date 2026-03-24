@@ -30,7 +30,7 @@ class PaddleOCROCR(OCRModel):
         self._engine = PaddleOCR(lang=self._lang, device=self._device, **self._extra)
 
     def run(self, crop: Image.Image) -> str:
-        img_array = np.array(crop.convert("RGB"))
+        img_array = np.array(crop.convert("RGB"))[:, :, ::-1]  # RGB to BGR for PaddleOCR
         result = self._engine.ocr(img_array)
         if not result or not result[0]:
             return ""
