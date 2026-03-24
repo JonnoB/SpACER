@@ -1,12 +1,13 @@
 import marimo
 
-__generated_with = "0.18.4"
+__generated_with = "0.21.1"
 app = marimo.App(width="medium")
 
 
 @app.cell
 def _():
     import marimo as mo
+
     return (mo,)
 
 
@@ -118,10 +119,9 @@ def _(plt):
         _ax.text(_x, -_y + 1, _ch, ha="center", va="center", fontsize=22, fontweight="bold")
 
     _ax.set_xlim(0, 5)
-    _ax.set_ylim(-5, 0)
+    _ax.set_ylim(-5, 0.5)
     _ax.set_aspect("equal")
     _ax.axis("off")
-    _ax.set_title("Crossword: HAT × TEAM", fontsize=12)
     _fig
     return
 

@@ -1,12 +1,16 @@
 """
-Infer character-level bounding boxes from ALTO XML ground truth files.
+Infer character-level bounding boxes from SSU-tagged ALTO XML ground truth files.
 
 For each word (String element), character positions are estimated by
 uniformly distributing the word bounding box across its characters.
 Spaces are excluded from the output.
 
+Input:  data/spiritualist/ocr_gt_with_ssu  (tagged by tag_alto_ssu.py)
 Output: data/spiritualist/characters_inferred.parquet
-Columns: char_id, page_id, char_text, x, y, w, h
+Columns: char_id, page_id, char_text, x, y, w, h, ssu_id
+
+ssu_id is the SSU identifier string from the TextLine SSU attribute,
+e.g. "ssu_1_col_1". Characters on the same TextLine share the same ssu_id.
 """
 
 import xml.etree.ElementTree as ET
@@ -15,7 +19,7 @@ from pathlib import Path
 import pandas as pd
 
 ALTO_NS = {"alto": "http://www.loc.gov/standards/alto/ns-v4#"}
-INPUT_DIR = Path("data/spiritualist/ocr_gt")
+INPUT_DIR = Path("data/spiritualist/ocr_gt_with_ssu")
 OUTPUT_PATH = Path("data/spiritualist/characters_inferred.parquet")
 
 
@@ -27,6 +31,7 @@ def infer_characters_from_xml(xml_path: Path) -> list[dict]:
     records = []
     for block_idx, block in enumerate(root.findall(".//alto:TextBlock", ALTO_NS)):
         for line_idx, line in enumerate(block.findall("alto:TextLine", ALTO_NS)):
+            ssu_id = line.attrib.get("SSU", "")
             word_idx = 0
             for elem in line:
                 tag = elem.tag.split("}")[-1]
@@ -54,6 +59,7 @@ def infer_characters_from_xml(xml_path: Path) -> list[dict]:
                         "y": vpos,
                         "w": char_w,
                         "h": height,
+                        "ssu_id": ssu_id,
                     })
                 word_idx += 1
 
@@ -69,7 +75,7 @@ def main():
         all_records.extend(records)
         print(f"  {xml_path.name}: {len(records)} characters")
 
-    df = pd.DataFrame(all_records, columns=["char_id", "page_id", "char_text", "x", "y", "w", "h"])
+    df = pd.DataFrame(all_records, columns=["char_id", "page_id", "char_text", "x", "y", "w", "h", "ssu_id"])
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(OUTPUT_PATH, index=False)
     print(f"\nSaved {len(df):,} characters to {OUTPUT_PATH}")

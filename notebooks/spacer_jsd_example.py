@@ -22,9 +22,9 @@ def _(mo):
     - **Q** — ground-truth character positions (pixel-level bounding boxes)
     - **Predicted boxes** — 6 bounding box predictions for the page
 
-    From these we build **R** via `build_R`: the GT characters whose midpoints
-    fall inside at least one predicted region. R tells us what the parser
-    *sees* of the ground truth.
+    From these we build **R** via `build_R_from_region_pixels`: the GT characters
+    whose midpoints fall inside at least one predicted region. R tells us what the
+    parser *sees* of the ground truth.
 
     This is the only component the data supports without actual OCR output.
     Full decomposition (d_ocr, d_int, d_total) requires per-box OCR transcripts.
@@ -42,10 +42,8 @@ def _():
     import matplotlib.pyplot as plt
 
     from cotescore.dataset import load_limerick_example
-    from cotescore.adapters import boxes_to_pred_masks
-    from cotescore.types import TokenPositions
-    from cotescore._distributions import build_Q, build_R
-    from cotescore import jsd_distance, spacer
+    from cotescore import RegionChars, boxes_to_region_pixels, jsd_distance, spacer
+    from cotescore._distributions import build_R_from_region_pixels
 
     ground_truth, image, pred_boxes = load_limerick_example()
     img_h, img_w = image.shape[:2]
@@ -54,10 +52,9 @@ def _():
     print(f"Stories:         {len(ground_truth['stories'])}")
     print(f"Prediction boxes: {len(pred_boxes)}")
     return (
-        TokenPositions,
-        boxes_to_pred_masks,
-        build_Q,
-        build_R,
+        RegionChars,
+        boxes_to_region_pixels,
+        build_R_from_region_pixels,
         ground_truth,
         image,
         img_h,
@@ -71,45 +68,47 @@ def _():
 
 
 @app.cell
-def _(TokenPositions, ground_truth, np):
-    """Build TokenPositions from GT character bounding boxes."""
+def _(RegionChars, ground_truth, np):
+    """Build RegionChars from GT character bounding boxes."""
     _chars = []
     for _story in ground_truth["stories"].values():
         for _line in _story["lines"]:
             for _ch in _line["characters"]:
                 bx, by, bw, bh = _ch["bbox"]
-                _chars.append((_ch["char"], int(bx + bw / 2), int(by + bh / 2)))
+                _chars.append((_ch["char"], int(bx + bw / 2), int(by + bh / 2), _line["ssu"]))
 
-    token_positions = TokenPositions(
+    gt_chars = RegionChars(
         tokens=np.array([c[0] for c in _chars], dtype=object),
         xs=np.array([c[1] for c in _chars], dtype=int),
         ys=np.array([c[2] for c in _chars], dtype=int),
+        region_ids=np.array([c[3] for c in _chars], dtype=int),
     )
 
-    print(f"GT characters: {len(token_positions.tokens)} total, "
-          f"{len(set(token_positions.tokens.tolist()))} unique")
-    return (token_positions,)
+    print(f"GT characters: {len(gt_chars.tokens)} total, "
+          f"{len(set(gt_chars.tokens.tolist()))} unique")
+    return (gt_chars,)
 
 
 @app.cell
-def _(boxes_to_pred_masks, img_h, img_w, pred_boxes):
-    """Rasterise prediction boxes to binary masks."""
-    pred_masks = boxes_to_pred_masks(pred_boxes, img_w, img_h)
-    print(f"Masks: {len(pred_masks)}, each {pred_masks[0].shape}")
-    return (pred_masks,)
+def _(boxes_to_region_pixels, pred_boxes):
+    """Convert prediction boxes to RegionPixels."""
+    pred_pixels = boxes_to_region_pixels(pred_boxes)
+    print(f"Pred pixels entries: {len(pred_pixels.region_ids)}")
+    return (pred_pixels,)
 
 
 @app.cell
-def _(build_Q, build_R, pred_masks, token_positions):
+def _(build_R_from_region_pixels, gt_chars, pred_pixels):
     """Build Q (GT distribution) and R (parsed GT distribution)."""
-    Q = build_Q(token_positions)
-    R = build_R(token_positions, pred_masks)
+    from collections import Counter
+    Q = Counter(gt_chars.tokens.tolist())
+    R, _ = build_R_from_region_pixels(gt_chars, pred_pixels)
 
     _q_total = sum(Q.values())
     _r_total = sum(R.values())
     print(f"Q total: {_q_total} chars")
     print(f"R total: {_r_total} chars  ({_r_total/_q_total:.1%} of GT — >100% means overlapping boxes double-count)")
-    return Q, R
+    return Counter, Q, R
 
 
 @app.cell
@@ -153,9 +152,9 @@ def _(Q, R, jsd_distance, mo, spacer):
     distributions — insensitive to the total count, only the relative proportions matter.
 
     **SpACER** responds to absolute count differences (Ê) and net deletions (D).
-    Because `build_R` can double-count characters in overlapping boxes,
-    R may exceed Q in total count. A SpACER > 0 here reflects the character-level
-    count mismatch caused by that overlap, not missing characters.
+    Because `build_R_from_region_pixels` can double-count characters in overlapping
+    boxes, R may exceed Q in total count. A SpACER > 0 here reflects the
+    character-level count mismatch caused by that overlap, not missing characters.
 
     Both metrics would be 0 if the predicted boxes perfectly and exclusively
     covered every GT character exactly once.

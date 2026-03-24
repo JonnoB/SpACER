@@ -12,51 +12,33 @@ _LINE_SPLIT_HEIGHT_THRESHOLD = 60
 _MIN_LINE_HEIGHT = 10
 
 
-def _split_lines(crop: Image.Image) -> list[Image.Image]:
-    """Split a multi-line crop into individual line crops using a horizontal
-    projection profile.
+def _craft_split_lines(crop: Image.Image, craft) -> list[Image.Image]:
+    """Split a multi-line crop into individual line crops using CRAFT detection.
 
-    Converts the crop to grayscale, inverts it so ink is bright, computes a
-    row-wise sum (the projection), then finds valley rows (low ink density)
-    that separate text lines. Returns a list of sub-crops, one per line.
-    If no clear split is found, returns the original crop in a list.
+    Returns a list of sub-crops sorted top-to-bottom, one per detected line.
+    If no boxes are detected, returns the original crop in a list.
     """
-    gray = np.array(crop.convert("L"), dtype=np.float32)
-    # Invert: ink becomes high values, background becomes low
-    inverted = 255.0 - gray
-    row_profile = inverted.sum(axis=1)
+    img_array = np.array(crop.convert("RGB"))
+    result = craft.detect_text(img_array)
+    boxes = result.get("boxes", [])
 
-    # Smooth with a small window to reduce noise
-    window = max(3, crop.height // 40)
-    kernel = np.ones(window) / window
-    smoothed = np.convolve(row_profile, kernel, mode="same")
-
-    # Threshold: rows with total ink below this are considered gaps
-    ink_threshold = smoothed.max() * 0.15
-
-    in_text = False
-    regions = []
-    start = 0
-    for i, val in enumerate(smoothed):
-        if not in_text and val > ink_threshold:
-            in_text = True
-            start = i
-        elif in_text and val <= ink_threshold:
-            in_text = False
-            regions.append((start, i))
-    if in_text:
-        regions.append((start, len(smoothed)))
-
-    if len(regions) <= 1:
+    if not boxes:
         return [crop]
 
-    sub_crops = []
-    for top, bottom in regions:
-        if bottom - top < _MIN_LINE_HEIGHT:
+    regions = []
+    for box in boxes:
+        pts = np.array(box)
+        y_min = max(0, int(pts[:, 1].min()))
+        y_max = min(crop.height, int(pts[:, 1].max()))
+        if y_max - y_min < _MIN_LINE_HEIGHT:
             continue
-        sub_crops.append(crop.crop((0, top, crop.width, bottom)))
+        regions.append((y_min, y_max))
 
-    return sub_crops if sub_crops else [crop]
+    if not regions:
+        return [crop]
+
+    regions.sort()
+    return [crop.crop((0, top, crop.width, bottom)) for top, bottom in regions]
 
 
 class TrOCROCR(OCRModel):
@@ -64,8 +46,8 @@ class TrOCROCR(OCRModel):
 
     TrOCR is a single-line model. When split_lines=True (default), crops
     taller than the height threshold are automatically split into individual
-    line sub-crops using a horizontal projection profile. Each line is run
-    through TrOCR independently and the results are joined with a space.
+    line sub-crops using CRAFT text detection. Each line is run through TrOCR
+    independently and the results are joined with a space.
     """
 
     DEFAULT_MODEL = "microsoft/trocr-base-printed"
@@ -82,9 +64,15 @@ class TrOCROCR(OCRModel):
         self._split_lines = split_lines
         self._processor = None
         self._model = None
+        self._craft = None
 
     def load(self) -> None:
+        from craft_text_detector import Craft
         from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+
+        if self._split_lines:
+            self._craft = Craft(output_dir=None, cuda=(self._device != "cpu"))
+
         self._processor = TrOCRProcessor.from_pretrained(self._model_name)
         self._model = VisionEncoderDecoderModel.from_pretrained(self._model_name)
         self._model = self._model.to(self._device)
@@ -102,7 +90,7 @@ class TrOCROCR(OCRModel):
             split_counts: list[int] = []
             for crop in crops:
                 if crop.height > _LINE_SPLIT_HEIGHT_THRESHOLD:
-                    lines = _split_lines(crop)
+                    lines = _craft_split_lines(crop, self._craft)
                 else:
                     lines = [crop]
                 expanded.extend(lines)
