@@ -51,7 +51,7 @@ def load_model(model_name: str, device: str, batch_size: int, extra_kwargs: dict
         return TesseractOCR(**extra_kwargs)
     elif model_name == "trocr":
         from ocr_models.trocr import TrOCROCR
-        return TrOCROCR(device=device, **extra_kwargs)
+        return TrOCROCR(device=device, batch_size=batch_size, **extra_kwargs)
     elif model_name == "paddleocr":
         from ocr_models.paddleocr import PaddleOCROCR
         return PaddleOCROCR(device=device, **extra_kwargs)
