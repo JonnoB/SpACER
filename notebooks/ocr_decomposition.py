@@ -15,16 +15,32 @@ def _():
     import marimo as mo
     import numpy as np
     import pandas as pd
+    from collections import Counter
+    from cotescore._distributions import build_R_spatial
+    from cotescore import RegionChars, cdd_decomp_spatial, spacer_decomp_spatial, cote_score
 
-    from cotescore import RegionChars, cdd_decomp_spatial, spacer_decomp_spatial
+    from cotescore.adapters import boxes_to_gt_ssu_map, boxes_to_pred_masks, eval_shape
+    from jiwer import cer as jiwer_cer
+    from cotescore import spacer
+    import plotnine as p9
+
 
     return (
+        Counter,
         Path,
         RegionChars,
+        boxes_to_gt_ssu_map,
+        boxes_to_pred_masks,
+        build_R_spatial,
         cdd_decomp_spatial,
+        cote_score,
+        eval_shape,
+        jiwer_cer,
         mo,
         np,
+        p9,
         pd,
+        spacer,
         spacer_decomp_spatial,
     )
 
@@ -81,8 +97,10 @@ def _(chars_df):
 
 @app.cell
 def _(
+    Counter,
     RegionChars,
     bbox_dfs,
+    build_R_spatial,
     cdd_decomp_spatial,
     chars_df,
     np,
@@ -168,9 +186,9 @@ def _(
                 _cdd = cdd_decomp_spatial(_gt_chars, _bbox_arr, _pred_gt_ocr, _pred_parse_ocr)
                 _sp = spacer_decomp_spatial(_gt_chars, _bbox_arr, _pred_gt_ocr, _pred_parse_ocr)
 
-                from collections import Counter
+
                 _Q = Counter(_gt_chars.tokens.tolist())
-                from cotescore._distributions import build_R_spatial
+
                 _R_agg, _ = build_R_spatial(_gt_chars, _bbox_arr)
 
                 _records.append({
@@ -198,6 +216,34 @@ def _(
 
     results_df = pd.DataFrame(_records)
     return (results_df,)
+
+
+@app.cell
+def _(mo, results_df):
+    """
+    Parsing model diagnostics: predicted box count and R/Q capture ratio.
+
+    R/Q > 1 means predicted boxes overlap — characters are double-counted in R.
+    This inflates COTe coverage (more GT pixels hit) while also raising d_pars
+    because R diverges from Q in total count even if per-character proportions
+    look similar.
+    """
+    _diag = (
+        results_df.groupby("parsing_model")
+        .agg(
+            n_predicted_boxes=("n_predicted_boxes", "mean"),
+            n_gt_chars=("n_gt_chars", "mean"),
+            n_captured_chars=("n_captured_chars", "mean"),
+        )
+        .assign(capture_ratio=lambda d: (d["n_captured_chars"] / d["n_gt_chars"]).round(3))
+        .round(1)
+    )
+    mo.vstack([
+        mo.md("### Parsing diagnostics — predicted box count and R/Q capture ratio"),
+        mo.md("A `capture_ratio` > 1 means overlapping boxes are double-counting characters in R."),
+        mo.ui.table(_diag, selection=None),
+    ])
+    return
 
 
 @app.cell
@@ -326,15 +372,24 @@ def _(mo, results_df):
 
 
 @app.cell
-def _(Path, bbox_dfs, mo, parsing_models, pd):
+def _(
+    Path,
+    bbox_dfs,
+    boxes_to_gt_ssu_map,
+    boxes_to_pred_masks,
+    cote_score,
+    eval_shape,
+    mo,
+    parsing_models,
+    pd,
+):
     """COTe score — Coverage, Overlap, Trespass, Excess per parsing model.
 
     Uses the pre-built GT SSU bboxes CSV and the existing adapter functions
     (boxes_to_gt_ssu_map, boxes_to_pred_masks, eval_shape) to evaluate each
     parsing model's predicted boxes against the ground truth.
     """
-    from cotescore import cote_score
-    from cotescore.adapters import boxes_to_gt_ssu_map, boxes_to_pred_masks, eval_shape
+
 
     _REPO_ROOT = Path(__file__).resolve().parent.parent
     _GT_BBOXES_PATH = _REPO_ROOT / "data/spiritualist/gt_ssu_bboxes.csv"
@@ -386,6 +441,179 @@ def _(Path, bbox_dfs, mo, parsing_models, pd):
         mo.md("### COTe score — mean by parsing model"),
         mo.ui.table(cote_table, selection=None),
     ])
+    return (cote_df,)
+
+
+@app.cell
+def _(cote_df, mo, p9, results_df):
+    """Scatter plot: d_pars vs COTe score per page, faceted by parsing model."""
+
+    # d_pars is independent of ocr_model — average across ocr models per page
+    _dpars = (
+        results_df.groupby(["page", "parsing_model"])[["d_pars_cdd"]]
+        .mean()
+        .reset_index()
+    )
+    plot_df = _dpars.merge(
+        cote_df[["page", "parsing_model", "cote"]],
+        on=["page", "parsing_model"],
+    )
+
+    plot_df = plot_df#[(plot_df["d_pars_cdd"]<0.2)]
+
+    _plt = (
+        p9.ggplot(plot_df, p9.aes(x="cote", y="d_pars_cdd"))
+        + p9.geom_point(alpha=0.7, size=2)
+        + p9.geom_smooth(method="lm", se=False, color="firebrick", size=0.8)
+        + p9.facet_wrap("~parsing_model", nrow=1)
+        + p9.labs(
+            title="d_pars vs COTe score — one point per page",
+            x="COTe score",
+            y="d_pars (CDD)",
+        )
+        + p9.theme(figure_size=(12, 4)) + p9.ylim(0, 0.04)
+    )
+
+
+    mo.plain(_plt)
+    return (plot_df,)
+
+
+@app.cell
+def _(mo, plot_df):
+    """Spearman correlation between d_pars and COTe score per parsing model."""
+    from scipy.stats import spearmanr
+
+    _lines = ["**Spearman correlation: d_pars (CDD) vs COTe**\n"]
+    for _pm, _grp in plot_df.groupby("parsing_model"):
+        _r, _p = spearmanr(_grp["cote"], _grp["d_pars_cdd"])
+        _lines.append(f"- **{_pm}**: ρ = {_r:.3f}, p = {_p:.3f}")
+
+    mo.md("\n".join(_lines))
+    return (spearmanr,)
+
+
+@app.cell
+def _(
+    Counter,
+    chars_df,
+    jiwer_cer,
+    mo,
+    ocr_dfs,
+    ocr_models,
+    p9,
+    pages,
+    pd,
+    spacer,
+):
+    """Per-box CER vs d_ocr SpACER — expected tight correlation if metric is valid."""
+
+    _box_records = []
+    for _page in pages:
+        _chars_page = chars_df[chars_df["page_id"] == _page]
+        _gt_text_by_ssu = {
+            _ssu: "".join(_grp["char_text"].tolist())
+            for _ssu, _grp in _chars_page.groupby("ssu_id")
+        }
+
+        for _om in ocr_models:
+            _gt_key = ("gt", _om)
+            if _gt_key not in ocr_dfs:
+                continue
+            _ocr_page = ocr_dfs[_gt_key][ocr_dfs[_gt_key]["filename"] == f"{_page}.jpg"]
+            for _, _row in _ocr_page.iterrows():
+                _ssu_id = _row["ssu_id"]
+                if _ssu_id not in _gt_text_by_ssu:
+                    continue
+                _gt_text = _gt_text_by_ssu[_ssu_id]
+                _ocr_text = "".join(_row["ocr_text"].split())
+                if not _gt_text:
+                    continue
+                _box_records.append({
+                    "page": _page,
+                    "ssu_id": _ssu_id,
+                    "ocr_model": _om,
+                    "cer": jiwer_cer(_gt_text, _ocr_text),
+                    "d_ocr_spacer": spacer(Counter(_gt_text), Counter(_ocr_text)),
+                    "gt_len": len(_gt_text),
+                    "gt_text": _gt_text,
+                    "ocr_text": _ocr_text,
+                })
+
+    box_df = pd.DataFrame(_box_records)
+
+    #box_df = box_df[box_df['cer']<2]
+
+    _plt2 = (
+        p9.ggplot(box_df, p9.aes(x="cer", y="d_ocr_spacer"))
+        + p9.geom_point(alpha=0.2, size=1)
+        + p9.geom_smooth(method="lm", se=False, color="firebrick", size=0.8)
+        + p9.facet_wrap("~ocr_model", nrow=1)
+        + p9.labs(
+            title="Per-box CER vs d_ocr SpACER",
+            x="CER",
+            y="d_ocr SpACER",
+        )
+        + p9.theme(figure_size=(12, 4))
+    )
+
+    mo.plain(_plt2)
+    return (box_df,)
+
+
+@app.cell
+def _(box_df, mo, spearmanr):
+    """Spearman correlation between d_pars and COTe score per parsing model."""
+
+    _lines = ["**Spearman correlation: CER vs SpACER**\n"]
+    for _pm, _grp in box_df.groupby("ocr_model"):
+        _r, _p = spearmanr(_grp["cer"], _grp["d_ocr_spacer"])
+        _lines.append(f"- **{_pm}**: ρ = {_r:.3f}, p = {_p:.3f}")
+
+    mo.md("\n".join(_lines))
+    return
+
+
+@app.cell
+def _(Path, box_df):
+    """Save example GT/OCR text pairs for manual inspection.
+
+    Picks 5 examples per ocr_model spread across the CER range (low, mid, high),
+    and writes one text file per example to data/examples/ocr/.
+    """
+    _OUT_DIR = Path(__file__).resolve().parent.parent / "data/examples/ocr"
+    _OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    _N = 5
+    for _om, _grp in box_df.groupby("ocr_model"):
+        _sample = _grp.sort_values("cer").iloc[
+            [int(i * (len(_grp) - 1) / (_N - 1)) for i in range(_N)]
+        ]
+        for _, _row in _sample.iterrows():
+            _fname = f"{_row['page']}_{_row['ssu_id']}_{_om}.txt"
+            (_OUT_DIR / _fname).write_text(
+                f"page:      {_row['page']}\n"
+                f"ssu_id:    {_row['ssu_id']}\n"
+                f"ocr_model: {_om}\n"
+                f"CER:       {_row['cer']:.4f}\n"
+                f"SpACER:    {_row['d_ocr_spacer']:.4f}\n"
+                f"gt_len:    {_row['gt_len']}\n"
+                f"\n--- GT ---\n{_row['gt_text']}\n"
+                f"\n--- OCR ---\n{_row['ocr_text']}\n"
+            )
+
+    print(f"Saved {_N} examples per OCR model to {_OUT_DIR}")
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _(ocr_dfs):
+    print(ocr_dfs)
     return
 
 

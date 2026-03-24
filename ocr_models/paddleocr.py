@@ -38,15 +38,4 @@ class PaddleOCROCR(OCRModel):
         return " ".join(texts).strip()
 
     def run_batch(self, crops: list) -> list:
-        arrays = [np.array(c.convert("RGB")) for c in crops]
-        results = self._engine.ocr(arrays)
-        texts = []
-        for page_result in (results or []):
-            if not page_result:
-                texts.append("")
-                continue
-            page_texts = [line[1][0] for line in page_result if line and line[1]]
-            texts.append(" ".join(page_texts).strip())
-        while len(texts) < len(crops):
-            texts.append("")
-        return texts
+        return [self.run(crop) for crop in crops]
