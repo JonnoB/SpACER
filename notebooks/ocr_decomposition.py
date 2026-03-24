@@ -85,7 +85,7 @@ def _(Path, pd):
 
 @app.cell
 def _(ocr_dfs):
-    ocr_dfs
+    ocr_dfs[('gt', 'paddleocr')]
     return
 
 

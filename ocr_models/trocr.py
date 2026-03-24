@@ -12,24 +12,25 @@ _LINE_SPLIT_HEIGHT_THRESHOLD = 60
 _MIN_LINE_HEIGHT = 10
 
 
-def _craft_split_lines(crop: Image.Image, craft) -> list[Image.Image]:
-    """Split a multi-line crop into individual line crops using CRAFT detection.
+def _easyocr_split_lines(crop: Image.Image, reader) -> list[Image.Image]:
+    """Split a multi-line crop into individual line crops using EasyOCR's CRAFT detection.
 
     Returns a list of sub-crops sorted top-to-bottom, one per detected line.
     If no boxes are detected, returns the original crop in a list.
     """
     img_array = np.array(crop.convert("RGB"))
-    result = craft.detect_text(img_array)
-    boxes = result.get("boxes", [])
+    # detect() returns (horizontal_list, free_list); each is a list-per-image.
+    # horizontal boxes are [x_min, x_max, y_min, y_max].
+    horizontal_list, _ = reader.detect(img_array)
+    boxes = horizontal_list[0] if horizontal_list else []
 
     if not boxes:
         return [crop]
 
     regions = []
     for box in boxes:
-        pts = np.array(box)
-        y_min = max(0, int(pts[:, 1].min()))
-        y_max = min(crop.height, int(pts[:, 1].max()))
+        y_min = max(0, int(box[2]))
+        y_max = min(crop.height, int(box[3]))
         if y_max - y_min < _MIN_LINE_HEIGHT:
             continue
         regions.append((y_min, y_max))
@@ -67,11 +68,11 @@ class TrOCROCR(OCRModel):
         self._craft = None
 
     def load(self) -> None:
-        from craft_text_detector import Craft
         from transformers import TrOCRProcessor, VisionEncoderDecoderModel
 
         if self._split_lines:
-            self._craft = Craft(output_dir=None, cuda=(self._device != "cpu"))
+            import easyocr
+            self._craft = easyocr.Reader(["en"], gpu=(self._device != "cpu"))
 
         self._processor = TrOCRProcessor.from_pretrained(self._model_name)
         self._model = VisionEncoderDecoderModel.from_pretrained(self._model_name)
@@ -90,7 +91,7 @@ class TrOCROCR(OCRModel):
             split_counts: list[int] = []
             for crop in crops:
                 if crop.height > _LINE_SPLIT_HEIGHT_THRESHOLD:
-                    lines = _craft_split_lines(crop, self._craft)
+                    lines = _easyocr_split_lines(crop, self._craft)
                 else:
                     lines = [crop]
                 expanded.extend(lines)
