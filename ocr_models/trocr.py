@@ -11,6 +11,10 @@ _LINE_SPLIT_HEIGHT_THRESHOLD = 60
 # Minimum sub-crop height to pass to TrOCR — avoids feeding blank slivers.
 _MIN_LINE_HEIGHT = 10
 
+# Merge two CRAFT boxes into one line only if their y-overlap exceeds this
+# fraction of the smaller box height. Prevents adjacent lines from merging.
+_MERGE_OVERLAP_THRESHOLD = 0.4
+
 
 def _easyocr_split_lines(crop: Image.Image, reader) -> list[Image.Image]:
     """Split a multi-line crop into individual line crops using EasyOCR's CRAFT detection.
@@ -38,8 +42,20 @@ def _easyocr_split_lines(crop: Image.Image, reader) -> list[Image.Image]:
     if not regions:
         return [crop]
 
+    # Merge boxes whose y-ranges overlap significantly (same line),
+    # but keep adjacent lines separate (they only barely touch).
     regions.sort()
-    return [crop.crop((0, top, crop.width, bottom)) for top, bottom in regions]
+    merged = [list(regions[0])]
+    for y_min, y_max in regions[1:]:
+        prev_min, prev_max = merged[-1]
+        overlap = max(0, min(prev_max, y_max) - y_min)
+        min_height = min(prev_max - prev_min, y_max - y_min)
+        if min_height > 0 and overlap / min_height >= _MERGE_OVERLAP_THRESHOLD:
+            merged[-1][1] = max(prev_max, y_max)
+        else:
+            merged.append([y_min, y_max])
+
+    return [crop.crop((0, top, crop.width, bottom)) for top, bottom in merged]
 
 
 class TrOCROCR(OCRModel):
@@ -76,7 +92,7 @@ class TrOCROCR(OCRModel):
             import easyocr
             self._craft = easyocr.Reader(["en"], gpu=False)
 
-        self._processor = TrOCRProcessor.from_pretrained(self._model_name)
+        self._processor = TrOCRProcessor.from_pretrained(self._model_name, use_fast=True)
         self._model = VisionEncoderDecoderModel.from_pretrained(self._model_name)
         self._model = self._model.to(self._device)
         self._model.eval()
