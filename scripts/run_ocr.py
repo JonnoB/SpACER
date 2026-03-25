@@ -97,25 +97,33 @@ def prepare_crops(group_df: pd.DataFrame, image_dir: Path | None) -> list:
     return [crop_region(image, row.x, row.y, row.width, row.height) for row in rows]
 
 
+def prepare_crops_and_splits(group_df: pd.DataFrame, image_dir: Path | None, model: OCRModel) -> tuple:
+    """Load crops then run CPU pre-processing (e.g. Tesseract line splits).
+
+    Runs on a background thread so CPU work overlaps with GPU inference on the
+    previous image. For models without a prepare() override this is just image loading.
+    """
+    crops = prepare_crops(group_df, image_dir)
+    prepared = model.prepare(crops)
+    return group_df, prepared
+
+
 def process_image_group(
     group_df: pd.DataFrame,
-    crops: list,
+    prepared,
     model: OCRModel,
-    batch_size: int,
 ) -> pd.DataFrame:
-    ocr_texts: list[str] = []
-
-    for batch_start in range(0, len(crops), batch_size):
-        batch_crops = crops[batch_start : batch_start + batch_size]
-        try:
-            ocr_texts.extend(model.run_batch(batch_crops))
-        except Exception as e:
-            print(f"  Warning: batch OCR failed ({e}), falling back to per-crop")
-            for crop in batch_crops:
-                try:
-                    ocr_texts.append(model.run(crop))
-                except Exception:
-                    ocr_texts.append("")
+    try:
+        ocr_texts = model.run_prepared(prepared)
+    except Exception as e:
+        print(f"  Warning: run_prepared failed ({e}), falling back to per-crop")
+        crops = prepared[0] if isinstance(prepared, tuple) else prepared
+        ocr_texts = []
+        for crop in crops:
+            try:
+                ocr_texts.append(model.run(crop))
+            except Exception:
+                ocr_texts.append("")
 
     result = group_df.copy()
     result["ocr_text"] = ocr_texts
@@ -194,25 +202,23 @@ def main():
     print(f"Device: {args.device}  |  Model: {args.model}  |  Batch size: {args.batch_size}")
 
     with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(prepare_crops, df[df["filename"] == remaining[0]].copy(), image_dir) if remaining else None
+        future = executor.submit(prepare_crops_and_splits, df[df["filename"] == remaining[0]].copy(), image_dir, model) if remaining else None
 
         for i, filename in enumerate(tqdm(remaining, desc="Images")):
-            group_df = df[df["filename"] == filename].copy()
-
             try:
-                crops = future.result()
+                group_df, prepared = future.result()
             except Exception as e:
                 print(f"  Error loading {filename}: {e}")
                 if i + 1 < len(remaining):
-                    future = executor.submit(prepare_crops, df[df["filename"] == remaining[i + 1]].copy(), image_dir)
+                    future = executor.submit(prepare_crops_and_splits, df[df["filename"] == remaining[i + 1]].copy(), image_dir, model)
                 continue
 
-            # Prefetch next image while GPU runs inference on current
+            # Prefetch next image (+ splits) while GPU runs inference on current
             if i + 1 < len(remaining):
-                future = executor.submit(prepare_crops, df[df["filename"] == remaining[i + 1]].copy(), image_dir)
+                future = executor.submit(prepare_crops_and_splits, df[df["filename"] == remaining[i + 1]].copy(), image_dir, model)
 
             try:
-                result_df = process_image_group(group_df, crops, model, args.batch_size)
+                result_df = process_image_group(group_df, prepared, model)
                 result_df["ocr_model"] = args.model
                 part_path = parts_dir / f"{Path(filename).stem}.parquet"
                 result_df.to_parquet(part_path, index=False)

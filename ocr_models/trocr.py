@@ -99,29 +99,33 @@ class TrOCROCR(OCRModel):
     def run(self, crop: Image.Image) -> str:
         return self.run_batch([crop])[0]
 
-    def run_batch(self, crops: list) -> list:
+    def prepare(self, crops: list) -> tuple[list[Image.Image], list[int]]:
+        """CPU phase: split each crop into individual text lines using Tesseract.
+
+        Returns (expanded_crops, split_counts) where split_counts records how
+        many line sub-crops came from each original crop so they can be
+        reassembled after inference.
+        """
+        if not self._split_lines:
+            return (list(crops), [1] * len(crops))
+        expanded: list[Image.Image] = []
+        split_counts: list[int] = []
+        for crop in crops:
+            lines = _tesseract_split_lines(crop)
+            expanded.extend(lines)
+            split_counts.append(len(lines))
+        return (expanded, split_counts)
+
+    def run_prepared(self, prepared: tuple) -> list:
+        """GPU phase: run TrOCR on pre-split line crops and reassemble."""
         import torch
 
-        if self._split_lines:
-            # Expand crops that need line splitting; track how to reassemble
-            expanded: list[Image.Image] = []
-            split_counts: list[int] = []
-            for crop in crops:
-
-                lines = _tesseract_split_lines(crop)
-                expanded.extend(lines)
-                split_counts.append(len(lines))
-        else:
-            expanded = crops
-            split_counts = [1] * len(crops)
-
-        # Run TrOCR on expanded sub-crops in batch_size chunks
+        expanded, split_counts = prepared
         rgb_crops = [c.convert("RGB") for c in expanded]
         line_texts = []
-        for batch_start in range(0, len(rgb_crops), self._batch_size):
-            batch = rgb_crops[batch_start : batch_start + self._batch_size]
-            pixel_values = self._processor(images=batch, return_tensors="pt").pixel_values
-            pixel_values = pixel_values.to(self._device)
+        for i in range(0, len(rgb_crops), self._batch_size):
+            batch = rgb_crops[i : i + self._batch_size]
+            pixel_values = self._processor(images=batch, return_tensors="pt").pixel_values.to(self._device)
             with torch.no_grad():
                 generated_ids = self._model.generate(pixel_values)
             line_texts.extend(
@@ -129,11 +133,11 @@ class TrOCROCR(OCRModel):
                 for t in self._processor.batch_decode(generated_ids, skip_special_tokens=True)
             )
 
-        # Reassemble: join lines belonging to the same original crop
-        results = []
-        idx = 0
+        results, idx = [], 0
         for count in split_counts:
-            chunk = line_texts[idx : idx + count]
-            results.append("\n".join(t for t in chunk if t))
+            results.append("\n".join(t for t in line_texts[idx : idx + count] if t))
             idx += count
         return results
+
+    def run_batch(self, crops: list) -> list:
+        return self.run_prepared(self.prepare(crops))

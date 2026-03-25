@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.21.1"
+__generated_with = "0.18.4"
 app = marimo.App(width="full")
 
 
@@ -23,7 +23,6 @@ def _():
     from jiwer import cer as jiwer_cer
     from cotescore import spacer
     import plotnine as p9
-
 
     return (
         Counter,
@@ -85,7 +84,7 @@ def _(Path, pd):
 
 @app.cell
 def _(ocr_dfs):
-    ocr_dfs[('gt', 'paddleocr')]
+    ocr_dfs[('gt', 'trocr')]
     return
 
 
@@ -542,7 +541,7 @@ def _(
 
     box_df = pd.DataFrame(_box_records)
 
-    box_df = box_df[box_df['cer']<1]
+    box_df = box_df[box_df['cer']<2]
 
     _plt2 = (
         p9.ggplot(box_df, p9.aes(x="cer", y="d_ocr_spacer"))
