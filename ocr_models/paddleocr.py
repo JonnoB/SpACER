@@ -20,22 +20,24 @@ class PaddleOCROCR(OCRModel):
         self._engine = None
 
     def load(self) -> None:
-        import paddle
-        try:
-            paddle.set_flags({"FLAGS_use_mkldnn": False})
-        except Exception:
-            pass
-
         from paddleocr import PaddleOCR
-        self._engine = PaddleOCR(lang=self._lang, device=self._device, **self._extra)
+        self._engine = PaddleOCR(
+            lang=self._lang,
+            device=self._device,
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False,
+            **self._extra,
+        )
 
     def run(self, crop: Image.Image) -> str:
-        img_array = np.array(crop.convert("RGB"))[:, :, ::-1]  # RGB to BGR for PaddleOCR
-        result = self._engine.ocr(img_array)
-        if not result or not result[0]:
-            return ""
-        texts = [line[1][0] for line in result[0] if line and line[1]]
-        return " ".join(texts).strip()
+        img_array = np.array(crop.convert("RGB"))
+        result = self._engine.predict(img_array)
+        texts = []
+        for res in result:
+            if res and res.get("rec_texts"):
+                texts.extend(res["rec_texts"])
+        return " ".join(t for t in texts if t).strip()
 
     def run_batch(self, crops: list) -> list:
         return [self.run(crop) for crop in crops]
