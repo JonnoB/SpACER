@@ -90,7 +90,7 @@ class TrOCROCR(OCRModel):
 
         if self._split_lines:
             import easyocr
-            self._craft = easyocr.Reader(["en"], gpu=False)
+            self._craft = easyocr.Reader(["en"], gpu=True)
 
         self._processor = TrOCRProcessor.from_pretrained(self._model_name, use_fast=True)
         self._model = VisionEncoderDecoderModel.from_pretrained(self._model_name)
