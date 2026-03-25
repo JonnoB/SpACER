@@ -542,7 +542,7 @@ def _(
 
     box_df = pd.DataFrame(_box_records)
 
-    #box_df = box_df[box_df['cer']<2]
+    box_df = box_df[box_df['cer']<1]
 
     _plt2 = (
         p9.ggplot(box_df, p9.aes(x="cer", y="d_ocr_spacer"))
