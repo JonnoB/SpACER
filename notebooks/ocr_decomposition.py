@@ -5,6 +5,16 @@ app = marimo.App(width="full")
 
 
 @app.cell
+def _(mo):
+    mo.md(r"""
+    # Perform the full decompoistion for the model pipelines
+
+    This notebook
+    """)
+    return
+
+
+@app.cell
 def _():
     import sys
     from pathlib import Path
@@ -17,13 +27,12 @@ def _():
     import pandas as pd
     from collections import Counter
     from cotescore._distributions import build_R_spatial
-    from cotescore import RegionChars, cdd_decomp_spatial, spacer_decomp_spatial, cote_score
+    from cotescore import RegionChars, cdd_decomp, cdd_decomp_spatial, spacer_decomp_spatial, cote_score
 
     from cotescore.adapters import boxes_to_gt_ssu_map, boxes_to_pred_masks, eval_shape
     from jiwer import cer as jiwer_cer
     from cotescore import spacer
     import plotnine as p9
-
     return (
         Counter,
         Path,
@@ -31,6 +40,7 @@ def _():
         boxes_to_gt_ssu_map,
         boxes_to_pred_masks,
         build_R_spatial,
+        cdd_decomp,
         cdd_decomp_spatial,
         cote_score,
         eval_shape,
@@ -53,76 +63,110 @@ def _(Path, pd):
 
     chars_df = pd.read_parquet(_CHARS_PATH)
     chars_df = chars_df[chars_df["char_text"] != " "].reset_index(drop=True)
-    # Midpoints for point-in-box testing
     chars_df["cx"] = (chars_df["x"] + chars_df["w"] / 2).astype(int)
     chars_df["cy"] = (chars_df["y"] + chars_df["h"] / 2).astype(int)
 
-    # Load all OCR parquets keyed by (parsing_model, ocr_model)
+    # Load GT OCR parquets (parsing_model == "gt") into a single DataFrame.
+    # Filename pattern: spiritualist_gt_predictions_{ocr_model}_ocr.parquet
+    # Schema: filename, ssu_id, ocr_text
+    _gt_parts = []
+    for _f in sorted(_OCR_DIR.glob("spiritualist_gt_predictions_*_ocr.parquet")):
+        _om = _f.stem.removeprefix("spiritualist_gt_predictions_").removesuffix("_ocr")
+        _part = pd.read_parquet(_f)
+        _part["ocr_model"] = _om
+        _gt_parts.append(_part)
+    gt_ocr_df = pd.concat(_gt_parts, ignore_index=True) if _gt_parts else pd.DataFrame()
+
+    # Load prediction OCR parquets (non-GT parsing models) into a single DataFrame.
     # Filename pattern: spiritualist_{parsing_model}_predictions_{ocr_model}_ocr.parquet
-    _ocr_dfs = {}
+    # Schema: filename, x, y, width, height, ocr_text
+    _pred_parts = []
     for _f in sorted(_OCR_DIR.glob("*_ocr.parquet")):
         _inner = _f.stem.removeprefix("spiritualist_").removesuffix("_ocr")
         _sep = _inner.index("_predictions_")
         _pm = _inner[:_sep]
+        if _pm == "gt":
+            continue
         _om = _inner[_sep + len("_predictions_"):]
-        _ocr_dfs[(_pm, _om)] = pd.read_parquet(_f)
+        _part = pd.read_parquet(_f)
+        _part["parsing_model"] = _pm
+        _part["ocr_model"] = _om
+        _pred_parts.append(_part)
+    pred_ocr_df = pd.concat(_pred_parts, ignore_index=True) if _pred_parts else pd.DataFrame()
 
-    # Load all bbox CSVs keyed by parsing_model
+    # Load all bbox CSVs into a single DataFrame.
     # Filename pattern: spiritualist_{parsing_model}_predictions.csv
-    _bbox_dfs = {}
+    # Schema: filename, x, y, width, height
+    _bbox_parts = []
     for _f in sorted(_BBOX_DIR.glob("*.csv")):
         _pm = _f.stem.removeprefix("spiritualist_").removesuffix("_predictions")
-        _bbox_dfs[_pm] = pd.read_csv(_f)
+        _part = pd.read_csv(_f)
+        _part["parsing_model"] = _pm
+        _bbox_parts.append(_part)
+    bbox_df = pd.concat(_bbox_parts, ignore_index=True)
 
-    ocr_dfs = _ocr_dfs
-    bbox_dfs = _bbox_dfs
-    parsing_models = sorted(_bbox_dfs.keys())
-    ocr_models = sorted({k[1] for k in _ocr_dfs})
+    parsing_models = sorted(bbox_df["parsing_model"].unique())
+    ocr_models = sorted(pred_ocr_df["ocr_model"].unique()) if not pred_ocr_df.empty else []
     pages = sorted(chars_df["page_id"].unique())
-    return bbox_dfs, chars_df, ocr_dfs, ocr_models, pages, parsing_models
 
+    # Model display names: lowercase + strip underscores → display label.
+    _MODEL_DISPLAY_NAMES = {
+        # OCR models
+        "trocr":      "TrOCR",
+        "paddleocr":  "PaddleOCR",
+        "paddleocr":  "PaddleOCR",
+        "tesseract":  "Tesseract",
+        "craft":      "CRAFT",
+        # Parsing models
+        "heron":      "Heron",
+        "ppdocl":     "PPDoc-L",
+        "ppdocm":     "PPDoc-M",
+        "ppdocs":     "PPDoc-S",
+        "yolo":       "YOLO",
+    }
 
-@app.cell
-def _(ocr_dfs):
-    ocr_dfs[('gt', 'trocr')]
-    return
-
-
-@app.cell
-def _(chars_df):
-    chars_df
-    return
+    def display_name(name: str) -> str:
+        lower = name.lower().replace("_", "")
+        return _MODEL_DISPLAY_NAMES.get(lower, name.replace("_", "-").title())
+    return (
+        bbox_df,
+        chars_df,
+        display_name,
+        gt_ocr_df,
+        ocr_models,
+        pages,
+        parsing_models,
+        pred_ocr_df,
+    )
 
 
 @app.cell
 def _(
     Counter,
     RegionChars,
-    bbox_dfs,
+    bbox_df,
     build_R_spatial,
     cdd_decomp_spatial,
     chars_df,
+    gt_ocr_df,
     np,
-    ocr_dfs,
     ocr_models,
     pages,
     parsing_models,
     pd,
+    pred_ocr_df,
     spacer_decomp_spatial,
 ):
     """Precompute CDD and SpACER decompositions for all pages and model combinations.
 
     Data assumptions:
       chars_df columns: char_text, cx, cy, ssu_id, page_id
-        (ssu_id is a string like "ssu_1_col_1" — from tagged ALTO via infer_characters.py)
-      ocr_dfs[("gt", om)] columns: filename, ssu_id, ocr_text
-        (OCR run on GT SSU regions; ssu_id is the same string as in chars_df)
-      ocr_dfs[(pm, om)] columns: filename, x, y, width, height, ocr_text
-        (OCR run on predicted regions; bbox matched by integer coordinates)
+      gt_ocr_df columns: ocr_model, filename, ssu_id, ocr_text
+      pred_ocr_df columns: parsing_model, ocr_model, filename, x, y, width, height, ocr_text
+      bbox_df columns: parsing_model, filename, x, y, width, height
     """
 
     def _join_ocr_text(texts):
-        """Join space-separated OCR character tokens into a plain string."""
         return " ".join(texts).replace(" ", "")
 
     def _bbox_key(x, y, w, h):
@@ -134,7 +178,6 @@ def _(
     for _page in tqdm(pages, desc="pages"):
         _chars_page = chars_df[chars_df["page_id"] == _page]
 
-        # Factorize string ssu_ids to integers for RegionChars
         _ssu_codes, _ssu_uniques = pd.factorize(_chars_page["ssu_id"])
         _ssu_to_int = {s: i for i, s in enumerate(_ssu_uniques)}
 
@@ -146,48 +189,58 @@ def _(
         )
 
         for _pm in parsing_models:
-            _bbox_page = bbox_dfs[_pm][bbox_dfs[_pm]["filename"] == f"{_page}.jpg"].reset_index(drop=True)
+            _bbox_page = bbox_df.loc[
+                (bbox_df["parsing_model"] == _pm) &
+                (bbox_df["filename"] == f"{_page}.jpg")
+            ].reset_index(drop=True)
 
-            # (M, 4) array [x, y, w, h] — used directly by the fast bbox path
             _bbox_arr = _bbox_page[["x", "y", "width", "height"]].to_numpy(dtype=float)
 
-            # Coordinate → 0-based-index lookup for matching OCR output rows
             _bbox_key_to_id = {
                 _bbox_key(r["x"], r["y"], r["width"], r["height"]): i
                 for i, r in enumerate(_bbox_page.to_dict("records"))
             }
 
             for _om in ocr_models:
-                # pred_gt_ocr: {ssu_int -> ocr_text} from OCR on GT regions
-                _gt_key = ("gt", _om)
-                if _gt_key in ocr_dfs:
-                    _gt_page = ocr_dfs[_gt_key][ocr_dfs[_gt_key]["filename"] == f"{_page}.jpg"]
+                # GT OCR: {ssu_int -> ocr_text} from OCR on GT regions
+                _gt_page_ocr = gt_ocr_df.loc[
+                    (gt_ocr_df["ocr_model"] == _om) &
+                    (gt_ocr_df["filename"] == f"{_page}.jpg")
+                ]
+                if not _gt_page_ocr.empty:
                     _pred_gt_ocr = {
                         _ssu_to_int[row["ssu_id"]]: _join_ocr_text(row["ocr_text"].split())
-                        for _, row in _gt_page.iterrows()
+                        for _, row in _gt_page_ocr.iterrows()
                         if row["ssu_id"] in _ssu_to_int
                     }
                 else:
                     _pred_gt_ocr = {}
 
-                # pred_parse_ocr: {bbox_id -> ocr_text} matched by integer coordinates
-                _pred_key = (_pm, _om)
-                if _pred_key in ocr_dfs:
-                    _pred_page = ocr_dfs[_pred_key][ocr_dfs[_pred_key]["filename"] == f"{_page}.jpg"]
-                    _pred_parse_ocr = {
-                        _bbox_key_to_id[_k]: _join_ocr_text(row["ocr_text"].split())
-                        for _, row in _pred_page.iterrows()
-                        if (_k := _bbox_key(row["x"], row["y"], row["width"], row["height"])) in _bbox_key_to_id
-                    }
-                else:
+                # Prediction OCR: {bbox_id -> ocr_text} matched by integer coordinates.
+                # For "gt" parsing, regions are identical to the GT SSU boxes so there
+                # are no predicted-region OCR files; _pred_parse_ocr = {} correctly
+                # yields d_pars ≈ 0, d_int ≈ 0, d_total ≈ d_ocr (perfect-parsing baseline).
+                if _pm == "gt":
                     _pred_parse_ocr = {}
+                else:
+                    _pred_page_ocr = pred_ocr_df.loc[
+                        (pred_ocr_df["parsing_model"] == _pm) &
+                        (pred_ocr_df["ocr_model"] == _om) &
+                        (pred_ocr_df["filename"] == f"{_page}.jpg")
+                    ]
+                    if not _pred_page_ocr.empty:
+                        _pred_parse_ocr = {
+                            _bbox_key_to_id[_k]: _join_ocr_text(row["ocr_text"].split())
+                            for _, row in _pred_page_ocr.iterrows()
+                            if (_k := _bbox_key(row["x"], row["y"], row["width"], row["height"])) in _bbox_key_to_id
+                        }
+                    else:
+                        _pred_parse_ocr = {}
 
                 _cdd = cdd_decomp_spatial(_gt_chars, _bbox_arr, _pred_gt_ocr, _pred_parse_ocr)
                 _sp = spacer_decomp_spatial(_gt_chars, _bbox_arr, _pred_gt_ocr, _pred_parse_ocr)
 
-
                 _Q = Counter(_gt_chars.tokens.tolist())
-
                 _R_agg, _ = build_R_spatial(_gt_chars, _bbox_arr)
 
                 _records.append({
@@ -202,170 +255,302 @@ def _(
                     "d_ocr_cdd": _cdd.d_ocr,
                     "d_int_cdd": _cdd.d_int,
                     "d_total_cdd": _cdd.d_total,
-                    # SpACER macro
+                    # SpACER macro (dominant metric)
                     "d_pars_spacer_macro": _sp.d_pars_macro,
                     "d_ocr_spacer_macro": _sp.d_ocr_macro,
                     "d_int_spacer_macro": _sp.d_int_macro,
                     "d_total_spacer_macro": _sp.d_total_macro,
-                    # SpACER micro (d_pars_micro is always None with spatial API)
+                    # SpACER micro (supporting metric; d_pars_micro is always None with spatial API)
                     "d_ocr_spacer_micro": _sp.d_ocr_micro,
                     "d_int_spacer_micro": _sp.d_int_micro,
                     "d_total_spacer_micro": _sp.d_total_micro,
                 })
 
     results_df = pd.DataFrame(_records)
+
+    results_df['pars_int'] = results_df['d_int_spacer_macro'] + results_df['d_pars_spacer_macro']
+    results_df['pars_int_over_ocr'] = results_df['pars_int'] / results_df['d_ocr_spacer_macro']
+    results_df['total_over_two_ocr'] =  results_df['d_total_spacer_macro'] /(2*results_df['d_ocr_spacer_macro'])
+    results_df['ocr_over_total'] =  results_df['d_ocr_spacer_macro'] / results_df['d_total_spacer_macro'] 
     return (results_df,)
 
 
 @app.cell
-def _(mo, results_df):
-    """
-    Parsing model diagnostics: predicted box count and R/Q capture ratio.
+def _():
+    """LaTeX formatting helpers for ML-paper tables."""
 
-    R/Q > 1 means predicted boxes overlap — characters are double-counted in R.
-    This inflates COTe coverage (more GT pixels hit) while also raising d_pars
-    because R diverges from Q in total count even if per-character proportions
-    look similar.
-    """
-    _diag = (
-        results_df.groupby("parsing_model")
-        .agg(
-            n_predicted_boxes=("n_predicted_boxes", "mean"),
-            n_gt_chars=("n_gt_chars", "mean"),
-            n_captured_chars=("n_captured_chars", "mean"),
+    def bold_best_cols(df, lower_cols=None, higher_cols=None):
+        """Bold the best value per column. Returns a string-valued DataFrame for escape=False output.
+
+        lower_cols: column names where lower is better.
+        higher_cols: column names where higher is better.
+        """
+        lower_cols = lower_cols or []
+        higher_cols = higher_cols or []
+        result = df.copy().astype(object)
+        for col in df.columns:
+            best = df[col].min() if col in lower_cols else df[col].max()
+            for idx in df.index:
+                val = df.loc[idx, col]
+                s = f"{val:.3f}"
+                result.loc[idx, col] = f"\\textbf{{{s}}}" if val == best else s
+        return result
+
+    def bold_best_pivot(df, lower_is_better=True):
+        """Bold column-best values; bold + $^*$ for the overall table best.
+
+        Intended for pivot tables (parsing_model rows × ocr_model columns).
+        """
+        fn = "min" if lower_is_better else "max"
+        col_best = getattr(df, fn)(axis=0)
+        table_best = float(getattr(df.values, fn)())
+        result = df.copy().astype(object)
+        for col in df.columns:
+            for idx in df.index:
+                val = df.loc[idx, col]
+                s = f"{val:.3f}"
+                if val == table_best:
+                    s = f"\\textbf{{{s}}}$^{{*}}$"
+                elif val == col_best[col]:
+                    s = f"\\textbf{{{s}}}"
+                result.loc[idx, col] = s
+        return result
+
+    def latex_table(df, caption, label, col_fmt=None):
+        """Print a booktabs LaTeX table (escape=False, position=t)."""
+        kwargs = dict(
+            caption=caption,
+            label=label,
+            escape=False,
+            position="t",
+            float_format="%.3f",
         )
-        .assign(capture_ratio=lambda d: (d["n_captured_chars"] / d["n_gt_chars"]).round(3))
-        .round(1)
-    )
-    mo.vstack([
-        mo.md("### Parsing diagnostics — predicted box count and R/Q capture ratio"),
-        mo.md("A `capture_ratio` > 1 means overlapping boxes are double-counting characters in R."),
-        mo.ui.table(_diag, selection=None),
-    ])
-    return
+        if col_fmt:
+            kwargs["column_format"] = col_fmt
+        # Replace \hline with booktabs rules (\toprule, \midrule, \bottomrule)
+        _hline_count = 0
+        _lines = []
+        for _line in df.to_latex(**kwargs).split("\n"):
+            if _line.strip() == r"\hline":
+                _hline_count += 1
+                _lines.append(
+                    r"\toprule" if _hline_count == 1
+                    else r"\midrule" if _hline_count == 2
+                    else r"\bottomrule"
+                )
+            else:
+                _lines.append(_line)
+        print("\n".join(_lines))
+    return bold_best_cols, bold_best_pivot, latex_table
 
 
 @app.cell
-def _(mo, results_df):
-    """
-    d_ocr — mean per OCR model (independent of parsing model).
-    d_ocr is identical across all parsing models (it only depends on ocr_model),
-    so we deduplicate by taking the first parsing_model's rows per (page, ocr_model).
+def _(bold_best_cols, display_name, latex_table, mo, results_df):
+    """d_ocr — mean per OCR model (independent of parsing model).
+
+    d_ocr is identical across all parsing models, so we deduplicate by
+    taking the first parsing model's rows per (page, ocr_model).
     """
     _first_pm = results_df["parsing_model"].iloc[0]
     _ocr_rows = results_df[results_df["parsing_model"] == _first_pm]
 
-    _d_ocr_cdd = (
-        _ocr_rows.groupby("ocr_model")[["d_ocr_cdd"]]
-        .mean()
-        .rename(columns={"d_ocr_cdd": "CDD"})
+    d_ocr_table = (
+        _ocr_rows.groupby("ocr_model")
+        .mean(numeric_only=True)[["d_ocr_spacer_macro", "d_ocr_spacer_micro", "d_ocr_cdd"]]
+        .rename(columns={
+            "d_ocr_spacer_macro": "SpACER macro",
+            "d_ocr_spacer_micro": "SpACER micro",
+            "d_ocr_cdd": "CDD",
+        })
+        .rename(index=display_name)
+        .round(4)
     )
-    _d_ocr_spacer_macro = (
-        _ocr_rows.groupby("ocr_model")[["d_ocr_spacer_macro"]]
-        .mean()
-        .rename(columns={"d_ocr_spacer_macro": "SpACER macro"})
-    )
-    _d_ocr_spacer_micro = (
-        _ocr_rows.groupby("ocr_model")[["d_ocr_spacer_micro"]]
-        .median()
-        .rename(columns={"d_ocr_spacer_micro": "SpACER micro"})
-    )
-    d_ocr_table = _d_ocr_cdd.join(_d_ocr_spacer_macro).join(_d_ocr_spacer_micro).round(4)
 
-    mo.vstack([mo.md("### d_ocr — mean by OCR model"), mo.ui.table(d_ocr_table, selection=None)])
+    latex_table(
+        bold_best_cols(
+            d_ocr_table,
+            lower_cols=["SpACER macro", "SpACER micro", "CDD"],
+        ),
+        caption=r"OCR error ($d_\text{ocr}$) by OCR model, averaged over pages using GT regions. "
+                r"SpACER macro is the primary metric; lower is better.",
+        label="tab:d_ocr",
+    )
+
+    mo.vstack([mo.md("### $d_\\text{ocr}$ — mean by OCR model"), mo.ui.table(d_ocr_table, selection=None)])
     return
 
 
 @app.cell
-def _(mo, results_df):
-    """
-    d_pars — mean per parsing model (independent of OCR model).
-    d_pars depends only on the parser, so we average across all OCR models and pages.
-    """
-    _parse_rows = results_df
+def _(
+    bold_best_cols,
+    cote_table,
+    display_name,
+    latex_table,
+    map_df,
+    mo,
+    results_df,
+):
+    """d_pars — median per parsing model (independent of OCR model).
 
-    _d_pars_cdd = (
-        _parse_rows.groupby("parsing_model")[["d_pars_cdd"]]
-        .median()
-        .rename(columns={"d_pars_cdd": "CDD"})
+    Also joins COTe total score and mAP@0.5.
+    """
+    d_pars_table = (
+        results_df[results_df["parsing_model"] != "gt"]
+        .groupby("parsing_model")
+        .median(numeric_only=True)[["d_pars_spacer_macro", "d_pars_cdd"]]
+        .rename(columns={
+            "d_pars_spacer_macro": "SpACER macro",
+            "d_pars_cdd": "CDD",
+        })
+        # Join on raw parsing_model names before renaming index
+        .join(cote_table[["cote"]].rename(columns={"cote": "COTe"}))
+        .join(map_df[["mAP@0.5"]])
+        .rename(index=display_name)
+        .round(4)
     )
-    _d_pars_spacer_macro = (
-        _parse_rows.groupby("parsing_model")[["d_pars_spacer_macro"]]
-        .median()
-        .rename(columns={"d_pars_spacer_macro": "SpACER macro"})
-    )
-    d_pars_table = _d_pars_cdd.join(_d_pars_spacer_macro).round(4)
 
-    mo.vstack([mo.md("### d_pars — median by parsing model"), mo.ui.table(d_pars_table, selection=None)])
+    latex_table(
+        bold_best_cols(
+            d_pars_table,
+            lower_cols=["SpACER macro", "CDD"],
+            higher_cols=["COTe", "mAP@0.5"],
+        ),
+        caption=r"Parsing error ($d_\text{pars}$) by parsing model with COTe and mAP@0.5. "
+                r"SpACER macro is the primary metric; lower is better for SpACER/CDD, higher for COTe/mAP.",
+        label="tab:d_pars",
+    )
+
+    mo.vstack([mo.md("### $d_\\text{pars}$ — median by parsing model"), mo.ui.table(d_pars_table, selection=None)])
     return
 
 
 @app.cell
-def _(mo, results_df):
-    """
-    d_int — mean grouped by (parsing_model × ocr_model).
-    """
-    _parse_rows = results_df
+def _(bold_best_pivot, display_name, latex_table, mo, results_df):
+    """d_int — median grouped by (parsing_model × ocr_model)."""
+    _df = results_df[results_df["parsing_model"] != "gt"]
 
-    _d_int_cdd = (
-        _parse_rows.groupby(["parsing_model", "ocr_model"])["d_int_cdd"]
-        .mean()
-        .unstack("ocr_model")
-        .round(4)
-    )
-    _d_int_spacer_macro = (
-        _parse_rows.groupby(["parsing_model", "ocr_model"])["d_int_spacer_macro"]
-        .median()
-        .unstack("ocr_model")
-        .round(4)
-    )
-    _d_int_spacer_micro = (
-        _parse_rows.groupby(["parsing_model", "ocr_model"])["d_int_spacer_micro"]
-        .median()
-        .unstack("ocr_model")
-        .round(4)
+    def _pivot(col, agg="median"):
+        return (
+            _df.groupby(["parsing_model", "ocr_model"])[col]
+            .agg(agg)
+            .unstack("ocr_model")
+            .rename(index=display_name, columns=display_name)
+            .round(4)
+        )
+
+    _d_int_spacer_macro = _pivot("d_int_spacer_macro")
+    _d_int_spacer_micro = _pivot("d_int_spacer_micro")
+    _d_int_cdd = _pivot("d_int_cdd")
+
+    latex_table(
+        bold_best_pivot(_d_int_spacer_macro, lower_is_better=True),
+        caption=r"Interaction error ($d_\text{int}$, SpACER macro) by parsing model (rows) "
+                r"and OCR model (columns). \textbf{Bold}: column best; \textbf{bold}$^*$: overall best.",
+        label="tab:d_int",
     )
 
     mo.vstack([
-        mo.md("### d_int — mean by parsing × OCR model"),
-        mo.md("**CDD**"), mo.ui.table(_d_int_cdd.reset_index(), selection=None),
+        mo.md(r"### $d_\text{int}$ — median by parsing × OCR model"),
         mo.md("**SpACER macro**"), mo.ui.table(_d_int_spacer_macro.reset_index(), selection=None),
         mo.md("**SpACER micro**"), mo.ui.table(_d_int_spacer_micro.reset_index(), selection=None),
+        mo.md("**CDD**"), mo.ui.table(_d_int_cdd.reset_index(), selection=None),
     ])
     return
 
 
 @app.cell
-def _(mo, results_df):
-    """
-    d_total — mean grouped by (parsing_model × ocr_model).
-    """
-    _parse_rows = results_df
+def _(bold_best_pivot, display_name, latex_table, mo, results_df):
+    """d_total — mean grouped by (parsing_model × ocr_model)."""
+    _df = results_df[results_df["parsing_model"] != "gt"]
 
-    _d_total_cdd = (
-        _parse_rows.groupby(["parsing_model", "ocr_model"])["d_total_cdd"]
-        .mean()
-        .unstack("ocr_model")
-        .round(4)
-    )
-    _d_total_spacer_macro = (
-        _parse_rows.groupby(["parsing_model", "ocr_model"])["d_total_spacer_macro"]
-        .mean()
-        .unstack("ocr_model")
-        .round(4)
-    )
-    _d_total_spacer_micro = (
-        _parse_rows.groupby(["parsing_model", "ocr_model"])["d_total_spacer_macro"]
-        .median()
-        .unstack("ocr_model")
-        .round(4)
+    def _pivot(col, agg="mean"):
+        return (
+            _df.groupby(["parsing_model", "ocr_model"])[col]
+            .agg(agg)
+            .unstack("ocr_model")
+            .rename(index=display_name, columns=display_name)
+            .round(4)
+        )
+
+    _d_total_spacer_macro = _pivot("d_total_spacer_macro")
+    _d_total_spacer_micro = _pivot("d_total_spacer_micro")
+    _d_total_cdd = _pivot("d_total_cdd")
+
+    latex_table(
+        bold_best_pivot(_d_total_spacer_macro, lower_is_better=True),
+        caption=r"Total error ($d_\text{total}$, SpACER macro) by parsing model (rows) "
+                r"and OCR model (columns). \textbf{Bold}: column best; \textbf{bold}$^*$: overall best.",
+        label="tab:d_total",
     )
 
     mo.vstack([
-        mo.md("### d_total — mean by parsing × OCR model"),
+        mo.md(r"### $d_\text{total}$ — mean by parsing × OCR model"),
+        mo.md("**SpACER macro**"), mo.ui.table(_d_total_spacer_macro.reset_index(), selection=None),
+        mo.md("**SpACER micro**"), mo.ui.table(_d_total_spacer_micro.reset_index(), selection=None),
         mo.md("**CDD**"), mo.ui.table(_d_total_cdd.reset_index(), selection=None),
-        mo.md("**SpACER mean**"), mo.ui.table(_d_total_spacer_macro.reset_index(), selection=None),
-        mo.md("**SpACER median**"), mo.ui.table(_d_total_spacer_micro.reset_index(), selection=None),
+    ])
+    return
+
+
+@app.cell
+def _(mo, ocr_models, parsing_models):
+    """Dropdown selector for the (parsing_model × ocr_model) pair used in the scatter plot below."""
+    _pairs = [f"{pm} × {om}" for pm in parsing_models for om in ocr_models]
+    model_pair_dropdown = mo.ui.dropdown(_pairs, value=_pairs[0], label="Parsing × OCR model")
+    model_pair_dropdown
+    return
+
+
+@app.cell
+def _(mo, ocr_models, parsing_models, pd, results_df):
+    """P/R/F1: rule `d_total < 2*d_ocr` as predictor of `d_pars < d_ocr` (CDD), per model pair."""
+    _records = []
+    for _pm in parsing_models:
+        for _om in ocr_models:
+            _df = results_df.loc[
+                (results_df["parsing_model"] == _pm) & (results_df["ocr_model"] == _om)
+            ]
+            if _df.empty:
+                continue
+            _BAND = 0.05
+            _threshold_pred = 2 * _df["d_ocr_cdd"]
+            _pred_similar = (
+                (_df["d_total_cdd"] >= _threshold_pred * (1 - _BAND)) &
+                (_df["d_total_cdd"] <= _threshold_pred * (1 + _BAND))
+            )
+            _actual_similar = (
+                ((_df["d_pars_cdd"] + _df["d_int_cdd"]) >= _df["d_ocr_cdd"] * (1 - _BAND)) &
+                ((_df["d_pars_cdd"] + _df["d_int_cdd"]) <= _df["d_ocr_cdd"] * (1 + _BAND))
+            )
+            _df_excl = _df[~_pred_similar & ~_actual_similar]
+            _n_similar = int((_pred_similar | _actual_similar).sum())
+            _pred = _df_excl["d_total_cdd"] < 2 * _df_excl["d_ocr_cdd"]
+            _actual = (_df_excl["d_pars_cdd"] + _df_excl["d_int_cdd"]) < _df_excl["d_ocr_cdd"]
+            _tp = int((_pred & _actual).sum())
+            _fp = int((_pred & ~_actual).sum())
+            _fn = int((~_pred & _actual).sum())
+            _tn = int((~_pred & ~_actual).sum())
+            _n = _tp + _fp + _fn + _tn
+            _prec = _tp / (_tp + _fp) if (_tp + _fp) > 0 else 0
+            _rec = _tp / (_tp + _fn) if (_tp + _fn) > 0 else 0
+            _f1 = 2 * _prec * _rec / (_prec + _rec) if (_prec + _rec) > 0 else float("nan")
+            _acc = (_tp + _tn) / _n if _n > 0 else float("nan")
+            _records.append({
+                "parsing_model": _pm,
+                "ocr_model": _om,
+                "n_true": _tp + _fp,
+                "n_similar": _n_similar,
+                "n_false": _fn + _tn,
+                "precision": round(_prec, 3),
+                "recall": round(_rec, 3),
+                "F1": round(_f1, 3),
+                "accuracy": round(_acc, 3),
+            })
+
+    prf_table = pd.DataFrame(_records)
+    mo.vstack([
+        mo.md("### P/R/F1: rule `d_total < 2·d_ocr` predicts `d_pars < d_ocr` (CDD)"),
+        mo.ui.table(prf_table, selection=None),
     ])
     return
 
@@ -373,33 +558,29 @@ def _(mo, results_df):
 @app.cell
 def _(
     Path,
-    bbox_dfs,
+    bbox_df,
+    bold_best_cols,
     boxes_to_gt_ssu_map,
     boxes_to_pred_masks,
     cote_score,
+    display_name,
     eval_shape,
+    latex_table,
     mo,
     parsing_models,
     pd,
 ):
-    """COTe score — Coverage, Overlap, Trespass, Excess per parsing model.
-
-    Uses the pre-built GT SSU bboxes CSV and the existing adapter functions
-    (boxes_to_gt_ssu_map, boxes_to_pred_masks, eval_shape) to evaluate each
-    parsing model's predicted boxes against the ground truth.
-    """
-
+    """COTe score — Coverage, Overlap, Trespass, Excess per parsing model."""
 
     _REPO_ROOT = Path(__file__).resolve().parent.parent
     _GT_BBOXES_PATH = _REPO_ROOT / "data/spiritualist/gt_ssu_bboxes.csv"
 
-    # Factorize string ssu_ids to unique positive integers (0 = background)
     _gt_ssu_df = pd.read_csv(_GT_BBOXES_PATH)
     _ssu_codes, _ = pd.factorize(_gt_ssu_df["ssu_id"])
     _gt_ssu_df = _gt_ssu_df.copy()
     _gt_ssu_df["ssu_int"] = _ssu_codes + 1
 
-    _MAX_DIM = 500  # longest-side cap; eval_shape derives the scale factor
+    _MAX_DIM = 500
 
     _cote_records = []
     for _filename, _gt_page in _gt_ssu_df.groupby("filename"):
@@ -414,7 +595,10 @@ def _(
         )
 
         for _pm in parsing_models:
-            _pred_page = bbox_dfs[_pm][bbox_dfs[_pm]["filename"] == _filename]
+            _pred_page = bbox_df.loc[
+                (bbox_df["parsing_model"] == _pm) &
+                (bbox_df["filename"] == _filename)
+            ]
             _preds = boxes_to_pred_masks(
                 _pred_page.to_dict("records"), _eval_w, _eval_h, scale=_scale,
             )
@@ -430,24 +614,91 @@ def _(
             })
 
     cote_df = pd.DataFrame(_cote_records)
+    # Keep raw index so d_pars cell can join on parsing_model names directly.
     cote_table = (
-        cote_df.groupby("parsing_model")[["cote", "coverage", "overlap", "trespass", "excess"]]
+        cote_df[cote_df["parsing_model"] != "gt"]
+        .groupby("parsing_model")[["cote", "coverage", "overlap", "trespass", "excess"]]
         .mean()
         .round(4)
     )
 
+    _cote_display = cote_table.rename(index=display_name)
+    latex_table(
+        bold_best_cols(
+            _cote_display,
+            higher_cols=["cote", "coverage"],
+            lower_cols=["overlap", "trespass", "excess"],
+        ),
+        caption=r"COTe score and components by parsing model. "
+                r"Higher is better for COTe and Coverage; lower is better for Overlap, Trespass, Excess.",
+        label="tab:cote",
+    )
+
     mo.vstack([
         mo.md("### COTe score — mean by parsing model"),
-        mo.ui.table(cote_table, selection=None),
+        mo.ui.table(_cote_display, selection=None),
     ])
-    return (cote_df,)
+    return cote_df, cote_table
+
+
+@app.cell
+def _(Path, bbox_df, mo, np, parsing_models, pd):
+    """mAP@0.5 — single-class object detection mAP per parsing model."""
+
+    def _iou_matrix(pred_boxes, gt_boxes):
+        def _to_xyxy(b):
+            return np.column_stack([b[:, 0], b[:, 1], b[:, 0] + b[:, 2], b[:, 1] + b[:, 3]])
+        p = _to_xyxy(pred_boxes)
+        g = _to_xyxy(gt_boxes)
+        inter_x1 = np.maximum(p[:, None, 0], g[None, :, 0])
+        inter_y1 = np.maximum(p[:, None, 1], g[None, :, 1])
+        inter_x2 = np.minimum(p[:, None, 2], g[None, :, 2])
+        inter_y2 = np.minimum(p[:, None, 3], g[None, :, 3])
+        inter = np.maximum(0, inter_x2 - inter_x1) * np.maximum(0, inter_y2 - inter_y1)
+        area_p = (p[:, 2] - p[:, 0]) * (p[:, 3] - p[:, 1])
+        area_g = (g[:, 2] - g[:, 0]) * (g[:, 3] - g[:, 1])
+        union = area_p[:, None] + area_g[None, :] - inter
+        return np.where(union > 0, inter / union, 0.0)
+
+    _REPO_ROOT = Path(__file__).resolve().parent.parent
+    _gt_ssu_df = pd.read_csv(_REPO_ROOT / "data/spiritualist/gt_ssu_bboxes.csv")
+
+    _map_records = []
+    for _pm in [pm for pm in parsing_models if pm != "gt"]:
+        _ap_per_page = []
+        for _filename, _gt_page in _gt_ssu_df.groupby("filename"):
+            _gt_boxes = _gt_page[["x", "y", "width", "height"]].values.astype(float)
+            _pred_page = bbox_df.loc[
+                (bbox_df["parsing_model"] == _pm) &
+                (bbox_df["filename"] == _filename)
+            ]
+            if len(_pred_page) == 0:
+                _ap_per_page.append(0.0)
+                continue
+            _pred_boxes = _pred_page[["x", "y", "width", "height"]].values.astype(float)
+            _iou = _iou_matrix(_pred_boxes, _gt_boxes)
+            _matched_gt = set()
+            _tp = 0
+            for _pi in np.argsort(-_iou.max(axis=1)):
+                _gi = int(_iou[_pi].argmax())
+                if _iou[_pi, _gi] >= 0.5 and _gi not in _matched_gt:
+                    _tp += 1
+                    _matched_gt.add(_gi)
+            _fp = len(_pred_boxes) - _tp
+            _fn = len(_gt_boxes) - _tp
+            _denom = _tp + _fp + _fn
+            _ap_per_page.append(_tp / _denom if _denom > 0 else 0.0)
+        _map_records.append({"parsing_model": _pm, "mAP@0.5": round(float(np.mean(_ap_per_page)), 4)})
+
+    map_df = pd.DataFrame(_map_records).set_index("parsing_model")
+    mo.vstack([mo.md("### mAP@0.5 by parsing model"), mo.ui.table(map_df, selection=None)])
+    return (map_df,)
 
 
 @app.cell
 def _(cote_df, mo, p9, results_df):
     """Scatter plot: d_pars vs COTe score per page, faceted by parsing model."""
 
-    # d_pars is independent of ocr_model — average across ocr models per page
     _dpars = (
         results_df.groupby(["page", "parsing_model"])[["d_pars_cdd"]]
         .mean()
@@ -457,8 +708,6 @@ def _(cote_df, mo, p9, results_df):
         cote_df[["page", "parsing_model", "cote"]],
         on=["page", "parsing_model"],
     )
-
-    plot_df = plot_df#[(plot_df["d_pars_cdd"]<0.2)]
 
     _plt = (
         p9.ggplot(plot_df, p9.aes(x="cote", y="d_pars_cdd"))
@@ -473,87 +722,111 @@ def _(cote_df, mo, p9, results_df):
         + p9.theme(figure_size=(12, 4)) + p9.ylim(0, 0.04)
     )
 
-
     mo.plain(_plt)
-    return (plot_df,)
+    return
 
 
 @app.cell
-def _(mo, plot_df):
-    """Spearman correlation between d_pars and COTe score per parsing model."""
+def _(bold_best_cols, cote_df, display_name, latex_table, mo, pd, results_df):
+    """Spearman correlation between per-page d_pars (SpACER & CDD) and COTe score."""
     from scipy.stats import spearmanr
 
-    _lines = ["**Spearman correlation: d_pars (CDD) vs COTe**\n"]
-    for _pm, _grp in plot_df.groupby("parsing_model"):
-        _r, _p = spearmanr(_grp["cote"], _grp["d_pars_cdd"])
-        _lines.append(f"- **{_pm}**: ρ = {_r:.3f}, p = {_p:.3f}")
+    # Per-page d_pars for both metrics; d_pars is ocr_model-independent so average across it
+    _dpars = (
+        results_df[results_df["parsing_model"] != "gt"]
+        .groupby(["page", "parsing_model"])[["d_pars_spacer_macro", "d_pars_cdd"]]
+        .mean()
+        .reset_index()
+        .merge(cote_df[["page", "parsing_model", "cote"]], on=["page", "parsing_model"])
+    )
 
-    mo.md("\n".join(_lines))
+    _records = []
+    for _pm, _grp in _dpars.groupby("parsing_model"):
+        _r_sp, _p_sp = spearmanr(_grp["cote"], _grp["d_pars_spacer_macro"])
+        _r_cdd, _p_cdd = spearmanr(_grp["cote"], _grp["d_pars_cdd"])
+        _records.append({
+            "parsing_model": _pm,
+            "SpACER $\\rho$": round(_r_sp, 3),
+            "CDD $\\rho$": round(_r_cdd, 3),
+        })
+
+    _corr_df = (
+        pd.DataFrame(_records)
+        .set_index("parsing_model")
+        .rename(index=display_name)
+    )
+
+    latex_table(
+        bold_best_cols(_corr_df, lower_cols=["SpACER $\\rho$", "CDD $\\rho$"]),
+        caption=r"Spearman correlation ($\rho$) between per-page $d_\text{pars}$ "
+                r"and COTe score by parsing model. Negative $\rho$ indicates that "
+                r"higher COTe (better parsing geometry) corresponds to lower parsing error, "
+                r"as expected.",
+        label="tab:dpars_cote_spearman",
+    )
+
+    _lines = ["**Spearman correlation: d_pars vs COTe**\n"]
+    for _, _row in _corr_df.iterrows():
+        _lines.append(
+            f"- **{_}**: SpACER ρ = {_row['SpACER $\\rho$']:.3f}, "
+            f"CDD ρ = {_row['CDD $\\rho$']:.3f}"
+        )
+
+    mo.vstack([
+        mo.md("\n".join(_lines)),
+        mo.ui.table(_corr_df, selection=None),
+    ])
     return (spearmanr,)
 
 
 @app.cell
-def _(
-    Counter,
-    chars_df,
-    jiwer_cer,
-    mo,
-    ocr_dfs,
-    ocr_models,
-    p9,
-    pages,
-    pd,
-    spacer,
-):
-    """Per-box CER vs d_ocr SpACER — expected tight correlation if metric is valid."""
+def _(Counter, cdd_decomp, chars_df, gt_ocr_df, jiwer_cer, mo, p9, spacer):
+    """Per-box CER vs d_ocr SpACER/CDD — merge-based, no loops."""
 
-    _box_records = []
-    for _page in pages:
-        _chars_page = chars_df[chars_df["page_id"] == _page]
-        _gt_text_by_ssu = {
-            _ssu: "".join(_grp["char_text"].tolist())
-            for _ssu, _grp in _chars_page.groupby("ssu_id")
-        }
+    # GT text per SSU box: concatenate char_text within each (page_id, ssu_id)
+    _gt_text_df = (
+        chars_df.groupby(["page_id", "ssu_id"])["char_text"]
+        .apply("".join)
+        .reset_index()
+        .rename(columns={"char_text": "gt_text", "page_id": "page"})
+    )
+    _gt_text_df = _gt_text_df[_gt_text_df["gt_text"] != ""]
 
-        for _om in ocr_models:
-            _gt_key = ("gt", _om)
-            if _gt_key not in ocr_dfs:
-                continue
-            _ocr_page = ocr_dfs[_gt_key][ocr_dfs[_gt_key]["filename"] == f"{_page}.jpg"]
-            for _, _row in _ocr_page.iterrows():
-                _ssu_id = _row["ssu_id"]
-                if _ssu_id not in _gt_text_by_ssu:
-                    continue
-                _gt_text = _gt_text_by_ssu[_ssu_id]
-                _ocr_text = "".join(_row["ocr_text"].split())
-                if not _gt_text:
-                    continue
-                _box_records.append({
-                    "page": _page,
-                    "ssu_id": _ssu_id,
-                    "ocr_model": _om,
-                    "cer": jiwer_cer(_gt_text, _ocr_text),
-                    "d_ocr_spacer": spacer(Counter(_gt_text), Counter(_ocr_text)),
-                    "gt_len": len(_gt_text),
-                    "gt_text": _gt_text,
-                    "ocr_text": _ocr_text,
-                })
+    # Extract page_id from filename and clean OCR text
+    _ocr = gt_ocr_df.copy()
+    _ocr["page"] = _ocr["filename"].str.removesuffix(".jpg")
+    _ocr["ocr_text"] = _ocr["ocr_text"].str.split().str.join("")
 
-    box_df = pd.DataFrame(_box_records)
+    # Merge GT text with OCR text on (page, ssu_id)
+    box_df = _gt_text_df.merge(
+        _ocr[["page", "ssu_id", "ocr_model", "ocr_text"]],
+        on=["page", "ssu_id"],
+    )
+    box_df["gt_len"] = box_df["gt_text"].str.len()
 
-    box_df = box_df[box_df['cer']<2]
+    # Compute per-box metrics with apply (jiwer_cer list form returns aggregate, not per-row)
+    box_df["cer"] = box_df.apply(
+        lambda r: jiwer_cer(r["gt_text"].lower(), r["ocr_text"].lower()), axis=1
+    )
+    box_df["d_ocr_spacer"] = box_df.apply(
+        lambda r: spacer(Counter(r["gt_text"].lower()), Counter(r["ocr_text"].lower())), axis=1
+    )
+    box_df["d_ocr_cdd"] = box_df.apply(
+        lambda r: cdd_decomp({"gt": r["gt_text"].lower(), "ocr": r["ocr_text"].lower()}).d_ocr,
+        axis=1,
+    )
 
     _plt2 = (
         p9.ggplot(box_df, p9.aes(x="cer", y="d_ocr_spacer"))
         + p9.geom_point(alpha=0.2, size=1)
         + p9.geom_smooth(method="lm", se=False, color="firebrick", size=0.8)
-        + p9.facet_wrap("~ocr_model", nrow=1)
+        + p9.facet_wrap("~ocr_model", nrow=2)
         + p9.labs(
-            title="Per-box CER vs d_ocr SpACER",
+            title="Relationship between SpACER and CER given Ground Truth regions",
             x="CER",
             y="d_ocr SpACER",
         )
-        + p9.theme(figure_size=(12, 4))
+        + p9.theme(figure_size=(12, 4)) + p9.xlim(0, 1) + p9.ylim(0, 1)
     )
 
     mo.plain(_plt2)
@@ -561,58 +834,225 @@ def _(
 
 
 @app.cell
-def _(box_df, mo, spearmanr):
-    """Spearman correlation between d_pars and COTe score per parsing model."""
-
-    _lines = ["**Spearman correlation: CER vs SpACER**\n"]
-    for _pm, _grp in box_df.groupby("ocr_model"):
-        _r, _p = spearmanr(_grp["cer"], _grp["d_ocr_spacer"])
-        _lines.append(f"- **{_pm}**: ρ = {_r:.3f}, p = {_p:.3f}")
-
-    mo.md("\n".join(_lines))
+def _(box_df):
+    (box_df["cer"] < 1).sum() / box_df.shape[0]
     return
 
 
 @app.cell
-def _(Path, box_df):
-    """Save example GT/OCR text pairs for manual inspection.
+def _(bold_best_cols, box_df, display_name, latex_table, mo, pd, spearmanr):
+    """Spearman correlation between CER and per-box d_ocr metrics."""
 
-    Picks 5 examples per ocr_model spread across the CER range (low, mid, high),
-    and writes one text file per example to data/examples/ocr/.
-    """
-    _OUT_DIR = Path(__file__).resolve().parent.parent / "data/examples/ocr"
-    _OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    _N = 5
+    _records = []
     for _om, _grp in box_df.groupby("ocr_model"):
-        _sample = _grp.sort_values("cer").iloc[
-            [int(i * (len(_grp) - 1) / (_N - 1)) for i in range(_N)]
-        ]
-        for _, _row in _sample.iterrows():
-            _fname = f"{_row['page']}_{_row['ssu_id']}_{_om}.txt"
-            (_OUT_DIR / _fname).write_text(
-                f"page:      {_row['page']}\n"
-                f"ssu_id:    {_row['ssu_id']}\n"
-                f"ocr_model: {_om}\n"
-                f"CER:       {_row['cer']:.4f}\n"
-                f"SpACER:    {_row['d_ocr_spacer']:.4f}\n"
-                f"gt_len:    {_row['gt_len']}\n"
-                f"\n--- GT ---\n{_row['gt_text']}\n"
-                f"\n--- OCR ---\n{_row['ocr_text']}\n"
-            )
+        _r_sp, _p_sp = spearmanr(_grp["cer"], _grp["d_ocr_spacer"])
+        _r_cdd, _p_cdd = spearmanr(_grp["cer"], _grp["d_ocr_cdd"])
+        _records.append({
+            "ocr_model": _om,
+            "SpACER $\\rho$": round(_r_sp, 3),
+            "CDD $\\rho$": round(_r_cdd, 3),
+        })
 
-    print(f"Saved {_N} examples per OCR model to {_OUT_DIR}")
+    _corr_df = (
+        pd.DataFrame(_records)
+        .set_index("ocr_model")
+        .rename(index=display_name)
+    )
+
+    latex_table(
+        bold_best_cols(_corr_df, higher_cols=["SpACER $\\rho$", "CDD $\\rho$"]),
+        caption=r"Spearman correlation ($\rho$) between per-box CER and $d_\text{ocr}$ "
+                r"for SpACER (primary) and CDD, computed over GT regions. "
+                r"All correlations significant at $p < 0.001$.",
+        label="tab:cer_spearman",
+    )
+
+    _lines = ["**Spearman correlation: CER vs per-box d_ocr metrics**\n"]
+    for _om, _grp in box_df.groupby("ocr_model"):
+        _r_sp, _p_sp = spearmanr(_grp["cer"], _grp["d_ocr_spacer"])
+        _r_cdd, _p_cdd = spearmanr(_grp["cer"], _grp["d_ocr_cdd"])
+        _lines.append(
+            f"- **{_om}**: SpACER ρ = {_r_sp:.3f} (p = {_p_sp:.3f}), "
+            f"CDD ρ = {_r_cdd:.3f} (p = {_p_cdd:.3f})"
+        )
+
+    mo.vstack([
+        mo.md("\n".join(_lines)),
+        mo.ui.table(_corr_df, selection=None),
+    ])
+    return
+
+
+@app.cell
+def _(results_df):
+    results_df['parsing_model'].unique()
+    return
+
+
+@app.cell
+def _(mo, np, p9, results_df):
+    _temp = results_df.loc[~results_df['parsing_model'].isin(['gt']) & ~results_df['ocr_model'].isin(['trocr'])  ].copy()
+
+    _temp['truth_triage_pars_int'] = np.where(_temp['pars_int']> _temp['d_ocr_spacer_macro'], 'pars', 'ocr')
+    _temp['truth_triage_pars'] = np.where(_temp['d_pars_spacer_macro']> _temp['d_ocr_spacer_macro'], 'pars', 'ocr')
+
+    #Add in that when it is ppdoc-s or m automatically pars
+    _temp['truth_triage_pars_force'] = np.where(_temp['parsing_model'].isin(['ppdoc_m', 'ppdoc_s']), 'pars', _temp['truth_triage_pars']  )
+
+
+    mod_df = _temp
+
+    _plt =p9.ggplot(_temp, p9.aes(x = 'ocr_over_total', y ='d_pars_spacer_macro', colour = 'truth_triage_pars')) + p9.geom_point( ) +p9.xlim(0,5) +p9.ylim(0,0.1)
+
+    mo.plain(_plt)
+    return (mod_df,)
+
+
+@app.cell
+def _(mod_df):
+    mod_df.groupby('truth_triage_pars').size()
+    return
+
+
+@app.cell
+def _(mod_df, np, pd):
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.model_selection import train_test_split
+    from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+    from sklearn.metrics import roc_auc_score
+
+
+    _temp = mod_df.copy()
+    _features = [ 'ocr_over_total']
+    _target = 'truth_triage_pars_int'
+
+    # Drop NaNs
+    _clean_df = _temp.dropna(subset=_features + [_target])
+
+    _X = _clean_df[_features]
+    _y = _clean_df[_target]
+
+    # 1. Stratified Split: ensures 'ocr' is represented in both train and test
+    _X_train, _X_test, _y_train, _y_test = train_test_split(
+        _X, _y, test_size=0.2, #random_state=42, 
+        stratify=_y
+    )
+
+    _log_reg = LogisticRegression(class_weight='balanced')
+    _log_reg.fit(_X_train, _y_train)
+
+
+    # Predict
+    _y_pred = _log_reg.predict(_X_test)
+
+    # Performance
+    print(f"Number OCR dominant {((_y_train!='pars')).sum()}: Number of parsing dominant {((_y_train=='pars')).sum()}")
+    print("--- Stratified & Balanced Results ---")
+    print("Accuracy:", accuracy_score(_y_test, _y_pred))
+    print("\nClassification Report:")
+    print(classification_report(_y_test, _y_pred))
+
+    print("\nConfusion Matrix:")
+    _cm = confusion_matrix(_y_test, _y_pred)
+    print(_cm)
+
+    print("\nAdjusted Coefficients:")
+    for _name, _coef in zip(_X.columns, _log_reg.coef_[0]):
+        print(f"  {_name}: {_coef:.4f}")
+
+    # 1. Extract the intercept and coefficient
+    _intercept = _log_reg.intercept_[0]
+    _coef = _log_reg.coef_[0][0]
+
+    print(f"--- Logic for total_over_two_ocr ---")
+    print(f"Intercept: {_intercept:.4f}")
+    print(f"Coefficient: {_coef:.4f}")
+
+    # You MUST use probabilities for AUC, not class predictions
+    _y_probs = _log_reg.predict_proba(_X_test)[:, 1] 
+
+    roc_auc = roc_auc_score(_y_test, _y_probs)
+    print(f"ROC-AUC Score: {roc_auc:.4f}")
+
+
+
+    import matplotlib.pyplot as plt
+    from sklearn.utils import resample
+
+    n_iterations = 1000
+    stats = []
+
+    for i in range(n_iterations):
+        # 1. Resample the data
+        X_res, y_res = resample(_X, _y, stratify=_y)
+
+        # 2. Fit the model
+        boot_model = LogisticRegression(class_weight='balanced').fit(X_res, y_res)
+
+        # 3. Get probabilities for the "pars" class
+        # Note: ensure [:, 1] corresponds to the correct class index
+        y_probs = boot_model.predict_proba(X_res)[:, 1]
+
+        # 4. Calculate AUC for this bootstrap sample
+        current_auc = roc_auc_score(y_res, y_probs)
+
+        stats.append({
+            'intercept': boot_model.intercept_[0],
+            'coefficient': boot_model.coef_[0][0],
+            'auc': current_auc,
+        })
+
+    boot_results = pd.DataFrame(stats)
+
+    # Calculate 95% Confidence Intervals
+    ci_intercept = np.percentile(boot_results['intercept'], [2.5, 97.5])
+    ci_coef = np.percentile(boot_results['coefficient'], [2.5, 97.5])
+
+    print(f"Intercept 95% CI: {ci_intercept}")
+    print(f"Coefficient 95% CI: {ci_coef}")
+
+
+
+    ci_auc = np.percentile(boot_results['auc'], [2.5, 97.5])
+
+    print(f"Mean Bootstrap AUC: {boot_results['auc'].mean():.4f}")
+    print(f"AUC 95% CI: {ci_auc}")
+    return ci_coef, ci_intercept
+
+
+@app.cell
+def _(ci_coef, ci_intercept, np):
+    print(f"Intercept 95% CI: {np.exp(ci_intercept)}")
+    print(f"Coefficient 95% CI: {np.exp(ci_coef)}")
     return
 
 
 @app.cell
 def _():
+    176/(409+176)
     return
 
 
 @app.cell
-def _(ocr_dfs):
-    print(ocr_dfs)
+def _(mo, np, p9, pd, results_df):
+    _temp = results_df.loc[results_df['parsing_model']!='gt'].copy()
+
+    _temp['pars_int_cdd'] = _temp['d_int_cdd'] + _temp['d_pars_cdd']
+    _temp['pars_int_over_ocr_cdd'] = _temp['pars_int_cdd'] / _temp['d_ocr_cdd']
+    _temp['total_over_two_ocr_cdd'] = _temp['d_total_cdd'] /(2*_temp['d_ocr_cdd'] )
+
+    _temp['truth_triage_pars_int_cdd'] = np.where(_temp['pars_int_cdd']> _temp['d_ocr_cdd'], 'pars int_cdd', 'ocr')
+    _temp['truth_triage_pars_cdd'] = np.where(_temp['d_pars_cdd']> _temp['d_ocr_cdd'], 'pars', 'ocr')
+    _temp['pred_two_cer_cdd'] = np.where(_temp['total_over_two_ocr_cdd']>1, 'pred pars', 'pred ocr')
+
+
+    print(pd.crosstab(_temp['truth_triage_pars_cdd'] , _temp['pred_two_cer_cdd']))
+
+
+    _plt =p9.ggplot(_temp, p9.aes(x = 'd_ocr_cdd', y = 'd_pars_cdd', colour = 'pred_two_cer_cdd', shape = 'truth_triage_pars_cdd')) + p9.geom_point( ) +p9.xlim(0,0.1) +p9.ylim(0,0.1)
+
+    mo.plain(_plt)
     return
 
 

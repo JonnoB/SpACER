@@ -20,10 +20,10 @@ def _():
 
 @app.cell
 def _(Path, mo, pd):
-    ssu_csv = Path("data/results_spiritualist/spiritualist_gt_ssu_boxes.csv")
+    ssu_csv = Path("data/spiritualist/gt_ssu_bboxes.csv")
     ocr_parquet_dir = Path("data/results_spiritualist/docling_ocr_gt_s_star")
     image_dir = Path("data/spiritualist/spiritualist_images")
-    alto_dir = Path("data/spiritualist/ocr_gt_with_ssu")
+    alto_dir = Path("data/spiritualist/ocr_gt_new/enriched")
 
     _ssu_all = pd.read_csv(ssu_csv)
     pages = sorted(_ssu_all["filename"].str.replace(r"\.\w+$", "", regex=True).unique())
@@ -32,7 +32,15 @@ def _(Path, mo, pd):
     show_lines = mo.ui.checkbox(label="Show line-level boxes", value=True)
     show_word_ssus = mo.ui.checkbox(label="Show word-unioned SSU boxes", value=False)
     mo.vstack([page_picker, show_lines, show_word_ssus])
-    return alto_dir, image_dir, ocr_parquet_dir, page_picker, pages, show_lines, show_word_ssus, ssu_csv
+    return (
+        alto_dir,
+        image_dir,
+        ocr_parquet_dir,
+        page_picker,
+        show_lines,
+        show_word_ssus,
+        ssu_csv,
+    )
 
 
 @app.cell
@@ -296,7 +304,7 @@ def _(crop_bytes, full_ocr, img_bytes, mo, sel, ssu_picker, summary):
 
 
 @app.cell
-def _(ET, Image, ImageDraw, alto_dir, image_dir, io, mo, page, pd):
+def _(ET, Image, ImageDraw, alto_dir, image_dir, io, page, pd):
     """
     Duplicate word detection.
 
@@ -395,7 +403,6 @@ def _(ET, Image, ImageDraw, alto_dir, image_dir, io, mo, page, pd):
     _bufd = io.BytesIO()
     _dispd.save(_bufd, format="PNG")
     dup_img_bytes = _bufd.getvalue()
-
     return dup_df, dup_img_bytes, n_dups, n_words
 
 
@@ -425,6 +432,143 @@ def _(dup_df, dup_img_bytes, mo, n_dups, n_words):
             ]),
         ], align="start"),
     ])
+    return
+
+
+@app.cell
+def _(ET, Image, ImageDraw, Path, io, pd):
+    """Batch repeated-text detection across all pages in ocr_gt."""
+    import numpy as _np
+    from difflib import SequenceMatcher as _SequenceMatcher
+
+    _iou_thr = 0.5
+    _sim_thr = 0.8
+
+    _gt_dir = Path("data/spiritualist/ocr_gt")
+    _img_dir = Path("data/spiritualist/spiritualist_images")
+    out_dir = Path("data/results_spiritualist/repeated_text")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    def _extract_words(xml_path):
+        _tree = ET.parse(xml_path)
+        _root = _tree.getroot()
+        _ns_uri = _root.tag[1:_root.tag.index("}")] if _root.tag.startswith("{") else ""
+        _ns = {"alto": _ns_uri} if _ns_uri else {}
+        _q = lambda t: f"alto:{t}" if _ns else t
+        words = []
+        for _tb in _root.findall(f".//{_q('TextBlock')}", _ns):
+            _tb_id = _tb.get("ID", "")
+            for _tl in _tb.findall(f".//{_q('TextLine')}", _ns):
+                for _s in _tl:
+                    _ltag = _s.tag[_s.tag.index("}") + 1:] if "}" in _s.tag else _s.tag
+                    if _ltag != "String":
+                        continue
+                    try:
+                        wx = float(_s.attrib["HPOS"])
+                        wy = float(_s.attrib["VPOS"])
+                        ww = float(_s.attrib["WIDTH"])
+                        wh = float(_s.attrib["HEIGHT"])
+                    except (KeyError, ValueError):
+                        continue
+                    if ww <= 0 or wh <= 0:
+                        continue
+                    words.append({
+                        "content": _s.get("CONTENT", ""),
+                        "x1": wx, "y1": wy,
+                        "x2": wx + ww, "y2": wy + wh,
+                        "block_id": _tb_id,
+                    })
+        return words
+
+    def _find_duplicates(words):
+        n = len(words)
+        if n == 0:
+            return [], set()
+        arr = _np.array([[w["x1"], w["y1"], w["x2"], w["y2"]] for w in words], dtype=_np.float32)
+        ix1 = _np.maximum(arr[:, 0:1], arr[None, :, 0])
+        iy1 = _np.maximum(arr[:, 1:2], arr[None, :, 1])
+        ix2 = _np.minimum(arr[:, 2:3], arr[None, :, 2])
+        iy2 = _np.minimum(arr[:, 3:4], arr[None, :, 3])
+        inter = _np.maximum(0, ix2 - ix1) * _np.maximum(0, iy2 - iy1)
+        areas = (arr[:, 2] - arr[:, 0]) * (arr[:, 3] - arr[:, 1])
+        union = areas[:, None] + areas[None, :] - inter
+        iou_mat = _np.where(union > 0, inter / union, 0.0)
+        pr, pc = _np.where(_np.triu(iou_mat >= _iou_thr, k=1))
+        pairs = []
+        flagged = set()
+        for ri, ci in zip(pr.tolist(), pc.tolist()):
+            wa, wb = words[ri], words[ci]
+            sim = _SequenceMatcher(None, wa["content"], wb["content"]).ratio()
+            if sim < _sim_thr:
+                continue
+            pairs.append((ri, ci))
+            flagged.add(ri)
+            flagged.add(ci)
+        return pairs, flagged
+
+    _rows = []
+    for _xml_path in sorted(_gt_dir.glob("*.xml")):
+        _page_id = _xml_path.stem
+        _words = _extract_words(_xml_path)
+        _pairs, _flagged = _find_duplicates(_words)
+        _total = len(_words)
+        _n_rep = len(_flagged)
+        _fraction = round(_n_rep / _total, 4) if _total > 0 else 0.0
+        _img_saved = False
+        if _flagged:
+            _img_path = _img_dir / f"{_page_id}.jpg"
+            if _img_path.exists():
+                _orig = Image.open(_img_path).convert("RGB")
+                _draw = ImageDraw.Draw(_orig)
+                for _idx in _flagged:
+                    _fw = _words[_idx]
+                    _draw.rectangle(
+                        [int(_fw["x1"]), int(_fw["y1"]), int(_fw["x2"]), int(_fw["y2"])],
+                        outline=(220, 30, 30), width=3,
+                    )
+                _buf = io.BytesIO()
+                _orig.save(_buf, format="JPEG", quality=90)
+                (out_dir / f"{_page_id}_repeated.jpg").write_bytes(_buf.getvalue())
+                _img_saved = True
+        _rows.append({
+            "page_id": _page_id,
+            "n_repeated_words": _n_rep,
+            "n_duplicate_pairs": len(_pairs),
+            "total_words": _total,
+            "fraction": _fraction,
+            "image_saved": _img_saved,
+        })
+
+    batch_df = pd.DataFrame(_rows)
+    return batch_df, out_dir
+
+
+@app.cell
+def _(batch_df, mo, out_dir):
+    """Display batch repeated-text summary."""
+    _n_with_dups = (batch_df["n_repeated_words"] > 0).sum()
+    _status = (
+        mo.callout(
+            mo.md(f"**No repeated words found** across all {len(batch_df)} pages."),
+            kind="success",
+        )
+        if _n_with_dups == 0
+        else mo.callout(
+            mo.md(
+                f"**{_n_with_dups} of {len(batch_df)} pages** have repeated word positions. "
+                f"Highlighted images saved to `{out_dir}`."
+            ),
+            kind="warn",
+        )
+    )
+    mo.vstack([
+        mo.md("---\n### Batch: repeated word positions across all pages"),
+        _status,
+        mo.ui.table(
+            batch_df.sort_values("fraction", ascending=False).reset_index(drop=True)
+        ),
+    ])
+    return
 
 
 if __name__ == "__main__":

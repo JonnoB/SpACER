@@ -43,6 +43,7 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from ocr_models.base import OCRModel
+from scripts.crop_utils import crop_polygon
 
 
 def load_model(model_name: str, device: str, batch_size: int, extra_kwargs: dict) -> OCRModel:
@@ -93,8 +94,14 @@ def prepare_crops(group_df: pd.DataFrame, image_dir: Path | None) -> list:
     """Load image and crop all regions. Runs on a background thread for prefetching."""
     img_path = resolve_image_path(str(group_df.iloc[0]["image_path"]), image_dir)
     image = Image.open(img_path).convert("RGB")
-    rows = list(group_df.itertuples(index=False))
-    return [crop_region(image, row.x, row.y, row.width, row.height) for row in rows]
+    crops = []
+    for row in group_df.itertuples(index=False):
+        pp = getattr(row, "polygon_points", None)
+        if pp and isinstance(pp, str) and pp.strip():
+            crops.append(crop_polygon(image, pp))
+        else:
+            crops.append(crop_region(image, row.x, row.y, row.width, row.height))
+    return crops
 
 
 def prepare_crops_and_splits(group_df: pd.DataFrame, image_dir: Path | None, model: OCRModel) -> tuple:

@@ -14,6 +14,10 @@ dependencies = [
     "matplotlib>=3.5.0",
     "plotnine>=0.12.0",
     "marimo>=0.8.22",
+    "anthropic>=0.86.0",
+    "instructor>=1.14.5",
+    "lxml>=6.0.2",
+    "python-dotenv>=1.2.2",
 ]
 
 [project.optional-dependencies]
