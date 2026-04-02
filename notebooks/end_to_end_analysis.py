@@ -13,7 +13,32 @@ def _():
     from collections import Counter
     from cotescore import spacer, cdd_decomp
     import plotnine as p9
-    return Counter, Path, cdd_decomp, json, mo, p9, pd, spacer
+    import re
+    import unicodedata
+    return Counter, Path, cdd_decomp, json, mo, p9, pd, re, spacer, unicodedata
+
+
+@app.cell
+def _(re, unicodedata):
+    def _normalize_quotes(text):
+        text = re.sub(r'[\u2018\u2019\u201a\u201b\u2039\u203a`]', "'", text)
+        text = re.sub(r'[\u201c\u201d\u201e\u201f\u00ab\u00bb]', '"', text)
+        return text
+
+    def _normalize_dashes(text):
+        text = re.sub(r'[\u2013\u2014\u2015\u2012]', '-', text)
+        return text
+
+    def normalize_for_cer(text):
+        text = text.lower()
+        text = unicodedata.normalize('NFKC', text)
+        text = _normalize_quotes(text)
+        text = _normalize_dashes(text)
+        text = text.replace('\xa0', ' ')
+        text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
+        text = re.sub(r' +', ' ', text)
+        return text.strip()
+    return (normalize_for_cer,)
 
 
 @app.cell
@@ -99,9 +124,17 @@ def _(end_to_end_dir, json, pd):
 
 
 @app.cell
-def _(Counter, cdd_decomp, crop_df, gt_page_text, pd, spacer):
+def _(
+    Counter,
+    cdd_decomp,
+    crop_df,
+    gt_page_text,
+    normalize_for_cer,
+    pd,
+    spacer,
+):
     def _strip(text):
-        return "".join(text.split())
+        return normalize_for_cer(text).replace(" ", "")
 
     _records = []
     # extract reading-order index directly from ssu_id (e.g. "ssu_3_col_1" → 3)
@@ -151,9 +184,17 @@ def _(Counter, cdd_decomp, crop_df, gt_page_text, pd, spacer):
 
 
 @app.cell
-def _(Counter, cdd_decomp, gt_page_text, page_df, pd, spacer):
+def _(
+    Counter,
+    cdd_decomp,
+    gt_page_text,
+    normalize_for_cer,
+    page_df,
+    pd,
+    spacer,
+):
     def _strip(text):
-        return "".join(text.split())
+        return normalize_for_cer(text).replace(" ", "")
 
     _records = []
     for _, _row in page_df.iterrows():
@@ -198,6 +239,22 @@ def _(crop_results_df, page_results_df, pd):
 
 
 @app.cell
+def _(results_df):
+    _df = results_df.loc[results_df['metric_type']=='d_total', ['model', 'spacer', 'cdd']].groupby('model').median().round(3)
+
+    latex_str = _df.to_latex(
+        index=True,
+        caption="Median spacer and CDD by model (d\\_total)",
+        label="tab:model_median",
+        position="h",
+        column_format="l" + "r" * len(_df.columns),  # left for index, right for numeric cols
+    )
+
+    print(latex_str)
+    return
+
+
+@app.cell
 def _(mo, results_df):
     _summary = (
         results_df
@@ -218,7 +275,7 @@ def _(p9, results_df):
 
 @app.cell
 def _(p9, results_df):
-    p9.ggplot(results_df.loc[(results_df['metric_type'] == 'd_total') & ~results_df['model'].isin(['docling_pages'])], p9.aes(x='spacer', y='cdd', colour='model')) + p9.geom_point() + p9.ylim(0,0.1)  + p9.xlim(0,0.025)
+    p9.ggplot(results_df.loc[(results_df['metric_type'] == 'd_total') & ~results_df['model'].isin(['docling_pages'])], p9.aes(x='spacer', y='cdd', colour='model')) + p9.geom_point() + p9.ylim(0,0.1)  + p9.xlim(0,0.2)
     return
 
 
@@ -238,7 +295,7 @@ def _(p9, results_df):
             value_name="score",
         )
         .groupby(["model", "metric_type", "metric"], as_index=False)["score"]
-        .mean()
+        .median()
     )
     (
         p9.ggplot(_plot_df, p9.aes(x="model", y="score", fill="metric_type"))

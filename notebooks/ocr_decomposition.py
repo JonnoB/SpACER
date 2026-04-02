@@ -7,7 +7,7 @@ app = marimo.App(width="full")
 @app.cell
 def _(mo):
     mo.md(r"""
-    # Perform the full decompoistion for the model pipelines
+    # Perform the full decomposition for the model pipelines
 
     This notebook
     """)
@@ -33,6 +33,8 @@ def _():
     from jiwer import cer as jiwer_cer
     from cotescore import spacer
     import plotnine as p9
+    import re
+    import unicodedata
     return (
         Counter,
         Path,
@@ -49,9 +51,34 @@ def _():
         np,
         p9,
         pd,
+        re,
         spacer,
         spacer_decomp_spatial,
+        unicodedata,
     )
+
+
+@app.cell
+def _(re, unicodedata):
+    def _normalize_quotes(text):
+        text = re.sub(r'[\u2018\u2019\u201a\u201b\u2039\u203a`]', "'", text)
+        text = re.sub(r'[\u201c\u201d\u201e\u201f\u00ab\u00bb]', '"', text)
+        return text
+
+    def _normalize_dashes(text):
+        text = re.sub(r'[\u2013\u2014\u2015\u2012]', '-', text)
+        return text
+
+    def normalize_for_cer(text):
+        text = text.lower()
+        text = unicodedata.normalize('NFKC', text)
+        text = _normalize_quotes(text)
+        text = _normalize_dashes(text)
+        text = text.replace('\xa0', ' ')
+        text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
+        text = re.sub(r' +', ' ', text)
+        return text.strip()
+    return (normalize_for_cer,)
 
 
 @app.cell
@@ -149,6 +176,7 @@ def _(
     cdd_decomp_spatial,
     chars_df,
     gt_ocr_df,
+    normalize_for_cer,
     np,
     ocr_models,
     pages,
@@ -167,7 +195,7 @@ def _(
     """
 
     def _join_ocr_text(texts):
-        return " ".join(texts).replace(" ", "")
+        return normalize_for_cer(" ".join(texts).replace(" ", ""))
 
     def _bbox_key(x, y, w, h):
         return (int(x), int(y), int(w), int(h))
@@ -182,7 +210,7 @@ def _(
         _ssu_to_int = {s: i for i, s in enumerate(_ssu_uniques)}
 
         _gt_chars = RegionChars(
-            tokens=_chars_page["char_text"].to_numpy(dtype=object),
+            tokens=np.array([normalize_for_cer(c) for c in _chars_page["char_text"]], dtype=object),
             xs=_chars_page["cx"].to_numpy(dtype=np.intp),
             ys=_chars_page["cy"].to_numpy(dtype=np.intp),
             region_ids=_ssu_codes.astype(np.intp),
@@ -276,6 +304,18 @@ def _(
 
 
 @app.cell
+def _(results_df):
+    results_df.loc[results_df['ocr_model']=='trocr']
+    return
+
+
+@app.cell
+def _(results_df):
+    results_df.loc[results_df['ocr_model']=='trocr', ['parsing_model', 'd_total_spacer_macro', 'd_ocr_spacer_macro']].groupby('parsing_model').median()
+    return
+
+
+@app.cell
 def _():
     """LaTeX formatting helpers for ML-paper tables."""
 
@@ -356,7 +396,7 @@ def _(bold_best_cols, display_name, latex_table, mo, results_df):
 
     d_ocr_table = (
         _ocr_rows.groupby("ocr_model")
-        .mean(numeric_only=True)[["d_ocr_spacer_macro", "d_ocr_spacer_micro", "d_ocr_cdd"]]
+        .median(numeric_only=True)[["d_ocr_spacer_macro", "d_ocr_spacer_micro", "d_ocr_cdd"]]
         .rename(columns={
             "d_ocr_spacer_macro": "SpACER macro",
             "d_ocr_spacer_micro": "SpACER micro",
@@ -463,7 +503,7 @@ def _(bold_best_pivot, display_name, latex_table, mo, results_df):
     """d_total — mean grouped by (parsing_model × ocr_model)."""
     _df = results_df[results_df["parsing_model"] != "gt"]
 
-    def _pivot(col, agg="mean"):
+    def _pivot(col, agg="median"):
         return (
             _df.groupby(["parsing_model", "ocr_model"])[col]
             .agg(agg)
@@ -780,7 +820,17 @@ def _(bold_best_cols, cote_df, display_name, latex_table, mo, pd, results_df):
 
 
 @app.cell
-def _(Counter, cdd_decomp, chars_df, gt_ocr_df, jiwer_cer, mo, p9, spacer):
+def _(
+    Counter,
+    cdd_decomp,
+    chars_df,
+    gt_ocr_df,
+    jiwer_cer,
+    mo,
+    normalize_for_cer,
+    p9,
+    spacer,
+):
     """Per-box CER vs d_ocr SpACER/CDD — merge-based, no loops."""
 
     # GT text per SSU box: concatenate char_text within each (page_id, ssu_id)
@@ -806,13 +856,13 @@ def _(Counter, cdd_decomp, chars_df, gt_ocr_df, jiwer_cer, mo, p9, spacer):
 
     # Compute per-box metrics with apply (jiwer_cer list form returns aggregate, not per-row)
     box_df["cer"] = box_df.apply(
-        lambda r: jiwer_cer(r["gt_text"].lower(), r["ocr_text"].lower()), axis=1
+        lambda r: jiwer_cer(normalize_for_cer(r["gt_text"]), normalize_for_cer(r["ocr_text"])), axis=1
     )
     box_df["d_ocr_spacer"] = box_df.apply(
-        lambda r: spacer(Counter(r["gt_text"].lower()), Counter(r["ocr_text"].lower())), axis=1
+        lambda r: spacer(Counter(normalize_for_cer(r["gt_text"])), Counter(normalize_for_cer(r["ocr_text"]))), axis=1
     )
     box_df["d_ocr_cdd"] = box_df.apply(
-        lambda r: cdd_decomp({"gt": r["gt_text"].lower(), "ocr": r["ocr_text"].lower()}).d_ocr,
+        lambda r: cdd_decomp({"gt": normalize_for_cer(r["gt_text"]), "ocr": normalize_for_cer(r["ocr_text"])}).d_ocr,
         axis=1,
     )
 
@@ -892,7 +942,7 @@ def _(results_df):
 
 @app.cell
 def _(mo, np, p9, results_df):
-    _temp = results_df.loc[~results_df['parsing_model'].isin(['gt']) & ~results_df['ocr_model'].isin(['trocr'])  ].copy()
+    _temp = results_df.loc[~results_df['parsing_model'].isin(['gt'])   ].copy()
 
     _temp['truth_triage_pars_int'] = np.where(_temp['pars_int']> _temp['d_ocr_spacer_macro'], 'pars', 'ocr')
     _temp['truth_triage_pars'] = np.where(_temp['d_pars_spacer_macro']> _temp['d_ocr_spacer_macro'], 'pars', 'ocr')

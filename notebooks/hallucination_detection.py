@@ -19,7 +19,41 @@ def _():
     from cotescore import spacer, cdd_decomp
     from jiwer import cer as jiwer_cer
     import plotnine as p9
-    return Counter, Path, cdd_decomp, jiwer_cer, mo, p9, pd, spacer
+    import unicodedata
+    import re
+
+    def normalize_quotes(text):
+        # Single quotes / apostrophes
+        text = re.sub(r'[\u2018\u2019\u201a\u201b\u2039\u203a`]', "'", text)
+        # Double quotes
+        text = re.sub(r'[\u201c\u201d\u201e\u201f\u00ab\u00bb]', '"', text)
+        return text
+
+    def normalize_dashes(text):
+        text = re.sub(r'[\u2013\u2014\u2015\u2012]', '-', text)  # en/em dashes
+        return text
+
+    def normalize_for_cer(text):
+        text = text.lower()
+        text = unicodedata.normalize('NFKC', text)
+        text = normalize_quotes(text)
+        text = normalize_dashes(text)
+        text = text.replace('\xa0', ' ')
+        text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
+        text = re.sub(r' +', ' ', text)
+        text = text.strip()
+        return text
+    return (
+        Counter,
+        Path,
+        cdd_decomp,
+        jiwer_cer,
+        mo,
+        normalize_for_cer,
+        p9,
+        pd,
+        spacer,
+    )
 
 
 @app.cell
@@ -31,7 +65,7 @@ def _(Path):
 
 
 @app.cell
-def _(OCR_DIR, SSU_TEXT_PATH, pd):
+def _(OCR_DIR, SSU_TEXT_PATH, normalize_for_cer, pd):
     """Load all spiritualist_gt_predictions_* parquets and join with GT text."""
     _parts = []
     for _f in sorted(OCR_DIR.glob("spiritualist_gt_predictions_*.parquet")):
@@ -42,6 +76,17 @@ def _(OCR_DIR, SSU_TEXT_PATH, pd):
     _raw["page_id"] = _raw["filename"].str.removesuffix(".jpg")
 
     bb_df = _raw.merge(_gt[["page_id", "ssu_id", "gt_text"]], on=["page_id", "ssu_id"], how="left")
+
+    bb_df['gt_text'] = bb_df['gt_text'].apply(normalize_for_cer)
+    bb_df['ocr_text'] = bb_df['ocr_text'].apply(normalize_for_cer)
+
+
+    #bb_df['gt_text'] = bb_df['gt_text'].str.lower()
+    #bb_df['ocr_text'] = bb_df['ocr_text'].str.lower()
+
+    #bb_df['gt_text'] = bb_df['gt_text'].str.replace(r'(?<!\n)\n(?!\n)', ' ', regex=True)
+    #bb_df['ocr_text'] = bb_df['ocr_text'].str.replace(r'(?<!\n)\n(?!\n)', ' ', regex=True)
+
     bb_df
     return (bb_df,)
 
@@ -125,37 +170,31 @@ def _(mo, ranked_df):
 
 
 @app.cell
+def _(ranked_df):
+    ranked_df
+    return
+
+
+@app.cell
+def _(ranked_df):
+    ranked_df.loc[ (ranked_df['gt_len']>500)].shape[0]/ranked_df.shape[0]
+    return
+
+
+@app.cell
 def _(p9, ranked_df):
     """SpACER vs CDD scatter, coloured by model — divergence from the diagonal signals rank disagreement."""
     (
-        p9.ggplot(ranked_df.loc[ranked_df['ocr_model']!='trocr'], p9.aes(x="spacer", y="cdd", colour="ocr_model"))
+        p9.ggplot(ranked_df.loc[ (ranked_df['gt_len']>500)], p9.aes(x="spacer", y="cdd", colour="ocr_model"))
         + p9.geom_point(alpha=0.5, size=1.5)
-        + p9.geom_abline(slope=1, intercept=0, linetype="dashed", colour="grey")
+        #+ p9.geom_abline(slope=1, intercept=0, linetype="dashed", colour="grey")
         + p9.labs(
             title="SpACER vs CDD (d_ocr) per bounding box",
             x="SpACER",
             y="CDD",
             colour="OCR model",
         )
-        + p9.theme(figure_size=(8, 6)) #+ p9.ylim(0,0.2)  + p9.xlim(0,0.1)
-    )
-    return
-
-
-@app.cell
-def _(p9, ranked_df):
-    """Distribution of global rank difference (CDD rank − SpACER rank) by model."""
-    (
-        p9.ggplot(ranked_df, p9.aes(x="rank_diff_global", fill="ocr_model"))
-        + p9.geom_histogram(bins=40, position="identity", alpha=0.5)
-        + p9.geom_vline(xintercept=0, linetype="dashed", colour="black")
-        + p9.facet_wrap("~ocr_model", ncol=2)
-        + p9.labs(
-            title="Global rank difference: CDD rank − SpACER rank",
-            x="CDD rank − SpACER rank",
-            y="Count",
-        )
-        + p9.theme(figure_size=(10, 6), legend_position="none") 
+        + p9.theme(figure_size=(8, 6)) + p9.ylim(0,0.2)  + p9.xlim(0,0.1)
     )
     return
 
@@ -193,7 +232,7 @@ def _(ranked_df):
     relatively lenient — another class of potential anomaly.
     """
     top_neg = (
-        ranked_df
+        ranked_df.loc[(ranked_df['ocr_model']!='trocr') & (ranked_df['gt_len']>500) & (ranked_df['spacer']<0.25)]
         .sort_values("rank_diff_global", ascending=True)
         [["ocr_model", "filename", "ssu_id", "gt_text", "ocr_text",
           "cer", "spacer", "cdd",

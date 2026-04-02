@@ -53,6 +53,9 @@ def load_model(model_name: str, device: str, batch_size: int, extra_kwargs: dict
     elif model_name == "trocr":
         from ocr_models.trocr import TrOCROCR
         return TrOCROCR(device=device, batch_size=batch_size, **extra_kwargs)
+    elif model_name == "trocr2":
+        from ocr_models.trocr2 import TrOCR2OCR
+        return TrOCR2OCR(device=device, batch_size=batch_size, **extra_kwargs)
     elif model_name == "paddleocr":
         from ocr_models.paddleocr import PaddleOCROCR
         return PaddleOCROCR(device=device, **extra_kwargs)
@@ -61,7 +64,7 @@ def load_model(model_name: str, device: str, batch_size: int, extra_kwargs: dict
         gpu = device != "cpu"
         return EasyOCROCR(gpu=gpu, **extra_kwargs)
     else:
-        raise ValueError(f"Unknown model: {model_name!r}. Choose from: tesseract, trocr, paddleocr, easyocr")
+        raise ValueError(f"Unknown model: {model_name!r}. Choose from: tesseract, trocr, trocr2, paddleocr, easyocr")
 
 
 def crop_region(image: Image.Image, x: float, y: float, w: float, h: float) -> Image.Image:
@@ -109,9 +112,16 @@ def prepare_crops_and_splits(group_df: pd.DataFrame, image_dir: Path | None, mod
 
     Runs on a background thread so CPU work overlaps with GPU inference on the
     previous image. For models without a prepare() override this is just image loading.
+
+    polygon_points strings (when present in group_df) are passed as metadata so
+    models that support polygon-based line splitting can use them directly.
     """
     crops = prepare_crops(group_df, image_dir)
-    prepared = model.prepare(crops)
+    polygon_points = [
+        pp if isinstance(pp := getattr(row, "polygon_points", None), str) and pp.strip() else None
+        for row in group_df.itertuples(index=False)
+    ]
+    prepared = model.prepare(crops, metadata=polygon_points)
     return group_df, prepared
 
 
@@ -143,7 +153,7 @@ def main():
     parser.add_argument(
         "--model",
         required=True,
-        choices=["tesseract", "trocr", "paddleocr", "easyocr"],
+        choices=["tesseract", "trocr", "trocr2", "paddleocr", "easyocr"],
         help="OCR model to use",
     )
     parser.add_argument("--output", required=True, help="Path to final merged parquet file")

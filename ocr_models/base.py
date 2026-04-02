@@ -19,12 +19,17 @@ class OCRModel(ABC):
         """Run OCR on a list of crops. Override for GPU-efficient batching."""
         return [self.run(crop) for crop in crops]
 
-    def prepare(self, crops: list) -> Any:
+    def prepare(self, crops: list, metadata: list | None = None) -> Any:
         """CPU pre-processing step (e.g. line splitting). Default: identity.
 
         Designed to run on a background thread so CPU work can overlap with
         GPU inference on the previous batch. Override in models that have a
         distinct CPU pre-processing phase.
+
+        Args:
+            crops:    Per-region PIL image crops.
+            metadata: Optional per-crop metadata (e.g. polygon_points strings).
+                      Ignored by the default implementation.
         """
         return crops
 

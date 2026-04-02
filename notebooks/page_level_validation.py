@@ -53,7 +53,7 @@ def _(page_values_df, pd):
         })
 
     corr_df = pd.DataFrame(rows)
-    return
+    return (corr_df,)
 
 
 @app.cell
@@ -70,17 +70,23 @@ def _(p9, page_values_df):
 
 @app.cell
 def _(p9, page_values_df):
-    plot_df = page_values_df.loc[(page_values_df['parsing_model']=='heron') ]
+    plot_df = page_values_df#.loc[(page_values_df['parsing_model']=='heron') ]
 
-    p9.ggplot(plot_df, p9.aes(x = 'cdd_total', y = 'spacer_total', colour = 'ocr_model')) + p9.geom_point() + p9.ylim(0, 0.075)+ p9.xlim(0, 0.2)
+    p9.ggplot(plot_df, p9.aes(x = 'cer', y = 'spacer_total', colour = 'parsing_model')) + p9.geom_point() + p9.ylim(0, 0.075)+ p9.xlim(0, 0.2)
+    return
+
+
+@app.cell
+def _(page_values_df):
+    page_values_df.columns
     return
 
 
 @app.cell
 def _(p9, page_values_df):
-    _plot_df = page_values_df.loc[(page_values_df['ocr_model']!='trocr') ]
+    _plot_df = page_values_df
 
-    p9.ggplot(_plot_df, p9.aes(x = 'ocr_model', y = 'cdd_total', fill = 'ocr_model')) + p9.geom_boxplot() + p9.ylim(0,0.2)
+    p9.ggplot(_plot_df, p9.aes(x = 'ocr_model', y = 'spacer_total', fill = 'ocr_model')) + p9.geom_boxplot() + p9.ylim(0,0.2)
     return
 
 
@@ -91,25 +97,34 @@ def _(page_values_df):
 
 
 @app.cell
-def _(p9, result_df):
+def _(corr_long):
+    corr_long
+    return
+
+
+@app.cell
+def _(corr_df, p9):
+
 
     # Convert to long format
-    result_long = result_df.melt(
+    corr_long = corr_df.melt(
         id_vars=['parsing_model', 'ocr_model'],
         value_vars=['spacer_cer_corr', 'cdd_cer_corr'],
         var_name='metric',
         value_name='correlation'
     )
 
+    corr_long = corr_long.loc[corr_long['parsing_model']!='gt']
+
     # Clean up metric labels
-    result_long['metric'] = result_long['metric'].map({
+    corr_long['metric'] = corr_long['metric'].map({
         'spacer_cer_corr': 'SpACER vs CER',
         'cdd_cer_corr': 'CDD vs CER'
     })
 
     # Facetted heatmap
     plot = (
-        p9.ggplot(result_long, p9.aes(x='ocr_model', y='parsing_model', fill='correlation'))
+        p9.ggplot(corr_long, p9.aes(x='ocr_model', y='parsing_model', fill='correlation'))
         + p9.geom_tile()
         + p9.geom_text(p9.aes(label='correlation.round(2)'), size=14, color='white')
         + p9.facet_wrap('~metric')
@@ -126,9 +141,9 @@ def _(p9, result_df):
             strip_text=p9.element_text(size=14, weight='bold')
         )
     )
-    plot.save(filename='data/figures/CVD_CER_correlation.pdf')
+    plot.save(filename='data/figures/CVD_CER_correlation.pdf', dpi = 300)
     plot.draw()
-    return
+    return (corr_long,)
 
 
 @app.cell

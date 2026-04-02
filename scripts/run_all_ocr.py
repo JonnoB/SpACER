@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from scripts.run_ocr import load_model, prepare_crops_and_splits, process_image_group, merge_parts
 
-ALL_MODELS = ["tesseract", "trocr", "paddleocr", "easyocr"]
+ALL_MODELS = ["tesseract", "trocr", "trocr2", "paddleocr", "easyocr"]
 
 
 def main():

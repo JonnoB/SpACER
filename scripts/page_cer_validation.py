@@ -18,7 +18,9 @@ for visual inspection.
 Output: data/results_spiritualist/page_level_cer_comparison.parquet
 """
 
+import re
 import sys
+import unicodedata
 from collections import Counter
 from pathlib import Path
 
@@ -47,9 +49,30 @@ _TEXT_PRED_DIR = _REPO / "data/results_spiritualist/page_text/pred"
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _normalize_quotes(text: str) -> str:
+    text = re.sub(r'[\u2018\u2019\u201a\u201b\u2039\u203a`]', "'", text)
+    text = re.sub(r'[\u201c\u201d\u201e\u201f\u00ab\u00bb]', '"', text)
+    return text
+
+
+def _normalize_dashes(text: str) -> str:
+    return re.sub(r'[\u2013\u2014\u2015\u2012]', '-', text)
+
+
+def normalize_for_cer(text: str) -> str:
+    text = text.lower()
+    text = unicodedata.normalize('NFKC', text)
+    text = _normalize_quotes(text)
+    text = _normalize_dashes(text)
+    text = text.replace('\xa0', ' ')
+    text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
+    text = re.sub(r' +', ' ', text)
+    return text.strip()
+
+
 def _strip(text: str) -> str:
-    """Remove all whitespace — used for metric computation only."""
-    return "".join(text.split())
+    """Normalise unicode and remove all whitespace — used for metric computation only."""
+    return normalize_for_cer(text).replace(" ", "")
 
 
 def _join_readable(texts) -> str:
