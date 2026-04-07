@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.18.4"
+__generated_with = "0.21.1"
 app = marimo.App(width="full")
 
 
@@ -15,6 +15,7 @@ def _():
     import plotnine as p9
     import re
     import unicodedata
+
     return Counter, Path, cdd_decomp, json, mo, p9, pd, re, spacer, unicodedata
 
 
@@ -38,6 +39,7 @@ def _(re, unicodedata):
         text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
         text = re.sub(r' +', ' ', text)
         return text.strip()
+
     return (normalize_for_cer,)
 
 
@@ -304,6 +306,17 @@ def _(p9, results_df):
         + p9.theme(axis_text_x=p9.element_text(angle=30, hjust=1), figure_size=(12, 6))
         + p9.labs(title="SpACER and CDD scores by model", x="Model", y="Score", fill="Metric type")
     )
+    return
+
+
+@app.cell
+def _(results_df):
+    results_df.melt(
+            id_vars=["model", "metric_type"],
+            value_vars=["spacer", "cdd"],
+            var_name="metric",
+            value_name="score",
+        ).groupby(["model", "metric_type", "metric"], as_index=False)["score"].median()
     return
 
 

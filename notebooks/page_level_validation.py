@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.18.4"
+__generated_with = "0.21.1"
 app = marimo.App(width="medium")
 
 
@@ -16,6 +16,7 @@ def _():
     import itertools
     import pandas as pd
     from itertools import product
+
     return p9, pd
 
 
@@ -27,7 +28,9 @@ def _(pd):
 
 @app.cell
 def _(page_values_df):
-    page_values_df
+    # Example results for the qualitative analysis in the paper.
+
+    page_values_df.loc[(page_values_df['page']=='0001_p001') & (page_values_df['parsing_model']=='ppdoc_s')].round(3)
     return
 
 
@@ -136,12 +139,13 @@ def _(corr_df, p9):
         + p9.theme_minimal()
         + p9.theme(
             figure_size=(12, 5),
-            axis_text_x=p9.element_text(rotation=45, hjust=1),
+            axis_text_y=p9.element_text(size=14),
+            axis_text_x=p9.element_text(rotation=45, hjust=1, size=12),
             panel_grid=p9.element_blank(),
             strip_text=p9.element_text(size=14, weight='bold')
         )
     )
-    plot.save(filename='data/figures/CVD_CER_correlation.pdf', dpi = 300)
+    plot.save(filename='data/figures/CEV_CER_correlation.pdf', dpi = 300)
     plot.draw()
     return (corr_long,)
 

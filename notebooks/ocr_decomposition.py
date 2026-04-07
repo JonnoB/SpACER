@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.18.4"
+__generated_with = "0.21.1"
 app = marimo.App(width="full")
 
 
@@ -35,6 +35,7 @@ def _():
     import plotnine as p9
     import re
     import unicodedata
+
     return (
         Counter,
         Path,
@@ -78,6 +79,7 @@ def _(re, unicodedata):
         text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
         text = re.sub(r' +', ' ', text)
         return text.strip()
+
     return (normalize_for_cer,)
 
 
@@ -155,6 +157,7 @@ def _(Path, pd):
     def display_name(name: str) -> str:
         lower = name.lower().replace("_", "")
         return _MODEL_DISPLAY_NAMES.get(lower, name.replace("_", "-").title())
+
     return (
         bbox_df,
         chars_df,
@@ -305,13 +308,7 @@ def _(
 
 @app.cell
 def _(results_df):
-    results_df.loc[results_df['ocr_model']=='trocr']
-    return
-
-
-@app.cell
-def _(results_df):
-    results_df.loc[results_df['ocr_model']=='trocr', ['parsing_model', 'd_total_spacer_macro', 'd_ocr_spacer_macro']].groupby('parsing_model').median()
+    results_df.loc[(results_df['page']=='0001_p001') & (results_df['parsing_model']=='ppdoc_s')]
     return
 
 
@@ -381,11 +378,12 @@ def _():
             else:
                 _lines.append(_line)
         print("\n".join(_lines))
+
     return bold_best_cols, bold_best_pivot, latex_table
 
 
 @app.cell
-def _(bold_best_cols, display_name, latex_table, mo, results_df):
+def _(bold_best_cols, box_df, display_name, latex_table, mo, results_df):
     """d_ocr — mean per OCR model (independent of parsing model).
 
     d_ocr is identical across all parsing models, so we deduplicate by
@@ -394,14 +392,20 @@ def _(bold_best_cols, display_name, latex_table, mo, results_df):
     _first_pm = results_df["parsing_model"].iloc[0]
     _ocr_rows = results_df[results_df["parsing_model"] == _first_pm]
 
+    _cer_by_model = (
+        box_df.groupby("ocr_model")["cer"]
+        .median()
+        .rename("CER")
+    )
+
     d_ocr_table = (
         _ocr_rows.groupby("ocr_model")
-        .median(numeric_only=True)[["d_ocr_spacer_macro", "d_ocr_spacer_micro", "d_ocr_cdd"]]
+        .median(numeric_only=True)[["d_ocr_spacer_macro", "d_ocr_cdd"]]
         .rename(columns={
             "d_ocr_spacer_macro": "SpACER macro",
-            "d_ocr_spacer_micro": "SpACER micro",
             "d_ocr_cdd": "CDD",
         })
+        .join(_cer_by_model)
         .rename(index=display_name)
         .round(4)
     )
@@ -409,10 +413,11 @@ def _(bold_best_cols, display_name, latex_table, mo, results_df):
     latex_table(
         bold_best_cols(
             d_ocr_table,
-            lower_cols=["SpACER macro", "SpACER micro", "CDD"],
+            lower_cols=["SpACER macro", "CDD", "CER"],
         ),
         caption=r"OCR error ($d_\text{ocr}$) by OCR model, averaged over pages using GT regions. "
-                r"SpACER macro is the primary metric; lower is better.",
+                r"SpACER macro is the primary metric; lower is better. "
+                r"CER is computed at GT bounding-box level.",
         label="tab:d_ocr",
     )
 
@@ -659,7 +664,7 @@ def _(
         cote_df[cote_df["parsing_model"] != "gt"]
         .groupby("parsing_model")[["cote", "coverage", "overlap", "trespass", "excess"]]
         .mean()
-        .round(4)
+        .round(2)
     )
 
     _cote_display = cote_table.rename(index=display_name)
@@ -942,9 +947,8 @@ def _(results_df):
 
 @app.cell
 def _(mo, np, p9, results_df):
-    _temp = results_df.loc[~results_df['parsing_model'].isin(['gt'])   ].copy()
+    _temp = results_df[~results_df["parsing_model"].isin(["gt", "ppdoc_s", "ppdoc_m"])].copy()
 
-    _temp['truth_triage_pars_int'] = np.where(_temp['pars_int']> _temp['d_ocr_spacer_macro'], 'pars', 'ocr')
     _temp['truth_triage_pars'] = np.where(_temp['d_pars_spacer_macro']> _temp['d_ocr_spacer_macro'], 'pars', 'ocr')
 
     #Add in that when it is ppdoc-s or m automatically pars
@@ -957,6 +961,11 @@ def _(mo, np, p9, results_df):
 
     mo.plain(_plt)
     return (mod_df,)
+
+
+@app.cell
+def _():
+    return
 
 
 @app.cell
@@ -975,7 +984,7 @@ def _(mod_df, np, pd):
 
     _temp = mod_df.copy()
     _features = [ 'ocr_over_total']
-    _target = 'truth_triage_pars_int'
+    _target = 'truth_triage_pars'
 
     # Drop NaNs
     _clean_df = _temp.dropna(subset=_features + [_target])
@@ -1079,17 +1088,11 @@ def _(ci_coef, ci_intercept, np):
 
 
 @app.cell
-def _():
-    176/(409+176)
-    return
-
-
-@app.cell
 def _(mo, np, p9, pd, results_df):
-    _temp = results_df.loc[results_df['parsing_model']!='gt'].copy()
+    _temp = results_df[~results_df["parsing_model"].isin(["gt", "ppdoc_s", "ppdoc_m"])].copy()
 
     _temp['pars_int_cdd'] = _temp['d_int_cdd'] + _temp['d_pars_cdd']
-    _temp['pars_int_over_ocr_cdd'] = _temp['pars_int_cdd'] / _temp['d_ocr_cdd']
+    _temp['pars_int_overesults_df[~results_df["parsing_model"].isin(["gt", "ppdoc_s", "ppdoc_m"])]r_ocr_cdd'] = _temp['pars_int_cdd'] / _temp['d_ocr_cdd']
     _temp['total_over_two_ocr_cdd'] = _temp['d_total_cdd'] /(2*_temp['d_ocr_cdd'] )
 
     _temp['truth_triage_pars_int_cdd'] = np.where(_temp['pars_int_cdd']> _temp['d_ocr_cdd'], 'pars int_cdd', 'ocr')
@@ -1103,6 +1106,166 @@ def _(mo, np, p9, pd, results_df):
     _plt =p9.ggplot(_temp, p9.aes(x = 'd_ocr_cdd', y = 'd_pars_cdd', colour = 'pred_two_cer_cdd', shape = 'truth_triage_pars_cdd')) + p9.geom_point( ) +p9.xlim(0,0.1) +p9.ylim(0,0.1)
 
     mo.plain(_plt)
+    return
+
+
+@app.cell
+def _(results_df):
+    results_df[~results_df["parsing_model"].isin(["gt"])].shape
+    return
+
+
+@app.cell
+def _(cote_df, mo, np, p9, pd, results_df):
+    """Heatmap: F1 of (COTe >= x_thresh AND d_ocr/d_total >= y_thresh) predicting d_ocr >= d_pars.
+
+    Both features are observable without character-level positions:
+      COTe          — geometric parsing quality vs GT boxes (higher = better geometry)
+      d_ocr/d_total — share of the total pipeline error attributable to the OCR step alone;
+                      high → OCR is the bottleneck, low → imperfect parsing degrades the result further
+
+    Positive class: d_ocr >= d_pars (SpACER macro).
+    Classifier rule: COTe >= x_thresh AND d_ocr/d_total >= y_thresh.
+    F1 = 2*TP / (2*TP + FP + FN) evaluated over the full (non-gt) dataset.
+    """
+    _x_thresh = np.linspace(0.0, 0.9, 10)   # COTe
+    _y_thresh = np.linspace(0.0, 0.9, 10)   # d_ocr / d_total
+    _x_step = float(_x_thresh[1] - _x_thresh[0])
+    _y_step = float(_y_thresh[1] - _y_thresh[0])
+
+    _df = results_df[~results_df["parsing_model"].isin(["gt"])].merge(cote_df[["page", "parsing_model", "cote"]], on=["page", "parsing_model"], how="left")
+
+    _df['ocr_over_total'] = _df["d_ocr_spacer_macro"] / _df["d_total_spacer_macro"]
+    _df['ocr_dominant'] = _df["d_ocr_spacer_macro"] >= _df["d_pars_spacer_macro"]
+
+
+
+    _df.loc[_df["parsing_model"].isin(["ppdoc_s", "ppdoc_m"]), "ocr_dominant"] = False
+
+    _x_vals = _df["cote"].to_numpy()
+    _y_vals = _df["ocr_over_total"].to_numpy()
+    _label = _df["ocr_dominant"].to_numpy()
+
+    mod_prep = _df
+
+    def _f1_for_thresh(cote_thresh, ocr_over_total_thresh):
+        _pred = (_x_vals >= cote_thresh) & (_y_vals >= ocr_over_total_thresh)
+        _tp = (_pred & _label).sum()
+        _fp = (_pred & ~_label).sum()
+        _fn = (~_pred & _label).sum()
+        _denom = 2 * _tp + _fp + _fn
+        return pd.Series({
+            "n": int(_pred.sum()),
+            "f1": float(2 * _tp / _denom) if _denom > 0 else np.nan,
+        })
+
+    _thresh_df = pd.DataFrame(
+        [(xt, yt) for xt in _x_thresh for yt in _y_thresh],
+        columns=["cote_thresh", "ocr_over_total_thresh"],
+    )
+    _heat_df = _thresh_df.join(
+        _thresh_df.apply(lambda r: _f1_for_thresh(r["cote_thresh"], r["ocr_over_total_thresh"]), axis=1)
+    )
+    _heat_df["label"] = (
+        _heat_df["f1"].map(lambda v: f"{v:.2f}")).where(_heat_df["f1"].notna(), "")
+
+    test_mod = _heat_df
+
+    _plt = (
+        p9.ggplot(_heat_df, p9.aes(x="cote_thresh", y="ocr_over_total_thresh", fill="f1"))
+        + p9.geom_tile(width=_x_step, height=_y_step)
+        + p9.geom_text(p9.aes(label="label"), size=7)
+        + p9.scale_x_continuous(breaks=_x_thresh, labels=[f"{v:.2f}" for v in _x_thresh])
+        + p9.scale_y_continuous(breaks=_y_thresh, labels=[f"{v:.2f}" for v in _y_thresh])
+        + p9.labs(
+            x="COTe score minimum threshold",
+            y="SpACER d_ocr / d_total minimum threshold",
+            fill="F1",
+            title="Is OCR dominant error source? F1 of SpACER d_ocr/d_total and COTe thresholds", 
+        )
+        + p9.theme(figure_size=(8, 5), 
+                  axis_text_y=p9.element_text(size=12),
+                  axis_text_x=p9.element_text(rotation=45, hjust=1, size=12),
+                  strip_text=p9.element_text(size=14, weight='bold'))
+    )
+    _plt.save(filename='data/figures/cutoff_thresholds.pdf', dpi = 300)
+    mo.plain(_plt)
+    return (mod_prep,)
+
+
+@app.cell
+def _(mod_prep):
+    mod_prep
+    return
+
+
+@app.cell
+def _(cote_df, mo, np, p9, pd, results_df):
+    """Marginal F1 per axis: single-feature threshold classifiers for d_ocr >= d_pars."""
+
+    _df = results_df[~results_df["parsing_model"].isin(["gt", "ppdoc_s", "ppdoc_m"])].merge(cote_df[["page", "parsing_model", "cote"]], on=["page", "parsing_model"], how="left")
+
+    _df['ocr_over_total'] = _df["d_ocr_spacer_macro"] / _df["d_total_spacer_macro"]
+    _df['ocr_dominant'] = _df["d_ocr_spacer_macro"] >= _df["d_pars_spacer_macro"]
+
+    _df.loc[_df["parsing_model"].isin(["ppdoc_s", "ppdoc_m"]), "ocr_dominant"] = False
+
+    _x_vals = _df["cote"].to_numpy()
+    _y_vals = _df["ocr_over_total"].to_numpy()
+    _label = _df["ocr_dominant"].to_numpy()
+
+    _x_thresh = np.linspace(-5, 1, 10)
+    _y_thresh = np.linspace(0.0, 1.5, 10)
+
+    def _f1(pred):
+        _tp = (pred & _label).sum()
+        _fp = (pred & ~_label).sum()
+        _fn = (~pred & _label).sum()
+        _denom = 2 * _tp + _fp + _fn
+        return float(2 * _tp / _denom) if _denom > 0 else np.nan
+
+    marginal_df = pd.concat([
+        pd.DataFrame({
+            "threshold": _x_thresh,
+            "f1": [_f1(_x_vals >= t) for t in _x_thresh],
+            "n": [int((_x_vals >= t).sum()) for t in _x_thresh],
+            "feature": "COTe",
+        }),
+        pd.DataFrame({
+            "threshold": _y_thresh,
+            "f1": [_f1(_y_vals >= t) for t in _y_thresh],
+            "n": [int((_y_vals >= t).sum()) for t in _y_thresh],
+            "feature": "d_ocr / d_total",
+        }),
+    ], ignore_index=True)
+
+    _plt = (
+        p9.ggplot(marginal_df, p9.aes(x="threshold", y="f1"))
+        + p9.geom_line()
+        + p9.geom_point()
+        + p9.facet_wrap("~feature", scales="free_x", nrow=1)
+        + p9.labs(
+            x="Minimum threshold (≥)",
+            y="F1",
+
+            title="Marginal F1 per axis — single-feature threshold classifier for d_ocr ≥ d_pars",
+        )
+        + p9.theme(figure_size=(12, 5))
+    )
+
+    mo.plain(_plt)
+    return (marginal_df,)
+
+
+@app.cell
+def _(marginal_df):
+    marginal_df
+    return
+
+
+@app.cell
+def _(cote_df, results_df):
+    results_df[~results_df["parsing_model"].isin(["gt", "ppdoc_s", "ppdoc_m"])].merge(cote_df[["page", "parsing_model", "cote"]], on=["page", "parsing_model"], how="left")
     return
 
 

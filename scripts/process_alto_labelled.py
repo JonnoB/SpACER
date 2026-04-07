@@ -601,7 +601,8 @@ def process_page(
     xml_path: Path,
     label_data: dict,
     output_dir: Path,
-) -> None:
+) -> tuple[int, int]:
+    """Process one page and return (line_count, word_count)."""
     page_stem = xml_path.stem
     log.info("=== Processing %s ===", xml_path.name)
 
@@ -625,6 +626,13 @@ def process_page(
 
     out_path = output_dir  / f"{page_stem}.xml"
     rewrite_xml(tree, new_blocks, out_path)
+
+    line_count = len(all_lines)
+    word_count = sum(
+        len(line["element"].xpath("a:String", namespaces=NS))
+        for line in all_lines
+    )
+    return line_count, word_count
 
 
 # ---------------------------------------------------------------------------
@@ -661,6 +669,8 @@ def main() -> None:
     errors = 0
     processed = 0
     skipped = 0
+    total_lines = 0
+    total_words = 0
     for xml_path in xml_files:
         page_stem = xml_path.stem
         if page_stem not in all_labels:
@@ -668,13 +678,16 @@ def main() -> None:
             skipped += 1
             continue
         try:
-            process_page(xml_path, all_labels[page_stem], args.output_dir)
+            line_count, word_count = process_page(xml_path, all_labels[page_stem], args.output_dir)
             processed += 1
+            total_lines += line_count
+            total_words += word_count
         except Exception as exc:
             log.error("FAILED %s: %s", xml_path.name, exc, exc_info=True)
             errors += 1
 
     log.info("Done: %d processed, %d skipped, %d errors", processed, skipped, errors)
+    log.info("Total lines: %d  |  Total words: %d", total_lines, total_words)
     if errors:
         raise SystemExit(f"{errors} page(s) failed")
 
