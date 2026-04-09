@@ -48,7 +48,7 @@ SpACER/
 
 ## Dataset
 
-The experiments use the **Spiritualist** dataset — a collection of archival newspaper pages with degraded images and complex layouts. Ground-truth SSU bounding boxes can be obtained from xxx
+The experiments use the **Spiritualist** dataset — a collection of archival newspaper pages with degraded images and complex layouts. Ground-truth SSU bounding boxes can be obtained from [HF the-spiritualist-enriched](https://huggingface.co/datasets/Jonnob/the-spiritualist-enriched).
 
 The original images can be obtained from [HuggingFace Spiritualise](https://huggingface.co/datasets/NationalLibraryOfScotland/Spiritualist_Newspaper)
 
@@ -83,14 +83,14 @@ Run the notebooks roughly in this order to follow the paper's validation sequenc
 
 If you use this work in your research, please cite:
 
-xxxxx
-
 ```bibtex
-@misc{bourne2026spacer,
-  title     = {xxxxx},
-  author    = {Bourne, Jonathan and others},
-  year      = {2026},
-  publisher = {arXiv},
-  doi       = {10.48550/arXiv.XXXX.XXXXX},
+@misc{bourne2026charactererrorvector,
+      title={The Character Error Vector: Decomposable errors for page-level OCR evaluation},
+      author={Jonathan Bourne and Mwiza Simbeye and Joseph Nockels},
+      year={2026},
+      eprint={2604.06160},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://doi.org/10.48550/arXiv.2604.06160}
 }
 ```
