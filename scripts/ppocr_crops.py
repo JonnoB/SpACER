@@ -18,13 +18,13 @@ Output is a single parquet, one row per crop:
 
 Usage:
     # PaddleOCR's installed default (whatever that resolves to)
-    python scripts/run_ocr_crops.py \\
+    python scripts/ppocr_crops.py \\
         --crops-dir data/nls_directories_crops \\
         --output data/nls_directories_paddleocr_ocr.parquet \\
         --device gpu
 
     # Explicit PP-OCRv6_medium via the transformers engine
-    python scripts/run_ocr_crops.py \\
+    python scripts/ppocr_crops.py \\
         --crops-dir data/nls_directories_crops \\
         --output data/nls_directories_paddleocr_v6medium_ocr.parquet \\
         --device gpu \\
@@ -65,6 +65,8 @@ def build_engine(args):
         "use_doc_orientation_classify": args.use_doc_orientation_classify,
         "use_doc_unwarping": args.use_doc_unwarping,
         "use_textline_orientation": args.use_textline_orientation,
+        "text_recognition_batch_size": args.batch_size,
+        "textline_orientation_batch_size": args.batch_size,
     }
     if args.engine is not None:
         kwargs["engine"] = args.engine
@@ -75,14 +77,18 @@ def build_engine(args):
     return PaddleOCR(**kwargs)
 
 
-def ocr_paths(engine, paths: list[str], batch_size: int) -> list[str]:
-    """Run the pipeline over a list of crop file paths, one result per path."""
-    results = list(engine.predict(paths, batch_size=batch_size))
+def ocr_paths(engine, paths: list[str]) -> list[str]:
+    """Run the pipeline over a list of crop file paths, one result per path.
+
+    Batch size is configured on the engine itself (text_recognition_batch_size,
+    textline_orientation_batch_size) — predict() takes no batch_size kwarg.
+    """
+    results = list(engine.predict(paths))
     if len(results) != len(paths):
         # Fall back to one-by-one if the engine didn't return a 1:1 mapping
         results = []
         for p in paths:
-            res = list(engine.predict(p, batch_size=1))
+            res = list(engine.predict(p))
             results.append(res[0] if res else {})
     texts = []
     for res in results:
@@ -122,7 +128,10 @@ def main():
     parser.add_argument("--use-textline-orientation", action="store_true")
     parser.add_argument("--use-doc-orientation-classify", action="store_true")
     parser.add_argument("--use-doc-unwarping", action="store_true")
-    parser.add_argument("--batch-size", type=int, default=8, help="Crops per predict() call (default: 8)")
+    parser.add_argument(
+        "--batch-size", type=int, default=8,
+        help="Recognition/textline-orientation batch size, set on the engine itself (default: 8)",
+    )
     args = parser.parse_args()
 
     crops_dir = Path(args.crops_dir)
@@ -163,7 +172,7 @@ def main():
         rows = pages[page_id]
         paths = [str(p) for _, _, p in rows]
         try:
-            ocr_texts = ocr_paths(engine, paths, args.batch_size)
+            ocr_texts = ocr_paths(engine, paths)
         except Exception as e:
             print(f"  Error processing {page_id}: {e}")
             continue
