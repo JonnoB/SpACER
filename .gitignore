@@ -78,3 +78,7 @@ logs/
 # Environment variables
 .env
 .env.local
+
+
+
+scripts/upload_to_huggingface.py
