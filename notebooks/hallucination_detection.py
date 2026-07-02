@@ -6,11 +6,7 @@ app = marimo.App(width="full")
 
 @app.cell
 def _():
-    import sys
     from pathlib import Path
-
-    _REPO_ROOT = Path(__file__).resolve().parent.parent
-    sys.path.insert(0, str(_REPO_ROOT / "cotescore/src"))
 
     import marimo as mo
     import pandas as pd

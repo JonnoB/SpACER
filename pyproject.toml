@@ -18,6 +18,7 @@ dependencies = [
     "instructor>=1.14.5",
     "lxml>=6.0.2",
     "python-dotenv>=1.2.2",
+    "cotescore",
 ]
 
 [project.optional-dependencies]
@@ -43,3 +44,6 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]  # pycodestyle, pyflakes, isort
+
+[tool.uv.sources]
+cotescore = { path = "../cotescore", editable = true }

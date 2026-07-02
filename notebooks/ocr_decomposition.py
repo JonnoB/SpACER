@@ -16,11 +16,7 @@ def _(mo):
 
 @app.cell
 def _():
-    import sys
     from pathlib import Path
-
-    _REPO_ROOT = Path(__file__).resolve().parent.parent
-    sys.path.insert(0, str(_REPO_ROOT / "cotescore/src"))
 
     import marimo as mo
     import numpy as np
@@ -29,7 +25,7 @@ def _():
     from cotescore._distributions import build_R_spatial
     from cotescore import RegionChars, cdd_decomp, cdd_decomp_spatial, spacer_decomp_spatial, cote_score
 
-    from cotescore.adapters import boxes_to_gt_ssu_map, boxes_to_pred_masks, eval_shape
+    from cotescore.adapters import boxes_to_gt_ssu_map, boxes_to_pred_masks, compute_canvas
     from jiwer import cer as jiwer_cer
     from cotescore import spacer
     import plotnine as p9
@@ -46,7 +42,7 @@ def _():
         cdd_decomp,
         cdd_decomp_spatial,
         cote_score,
-        eval_shape,
+        compute_canvas,
         jiwer_cer,
         mo,
         np,
@@ -609,7 +605,7 @@ def _(
     boxes_to_pred_masks,
     cote_score,
     display_name,
-    eval_shape,
+    compute_canvas,
     latex_table,
     mo,
     parsing_models,
@@ -632,11 +628,11 @@ def _(
         _page_id = Path(_filename).stem
         _orig_w = int(_gt_page["image_width"].iloc[0])
         _orig_h = int(_gt_page["image_height"].iloc[0])
-        _eval_w, _eval_h, _scale = eval_shape(_orig_w, _orig_h, max_dim=_MAX_DIM)
+        _eval_w, _eval_h = compute_canvas(_orig_w, _orig_h, max_dim=_MAX_DIM)
 
         _ssu_map = boxes_to_gt_ssu_map(
-            _gt_page.to_dict("records"), _eval_w, _eval_h,
-            scale=_scale, ssu_id_key="ssu_int",
+            _gt_page.to_dict("records"), _orig_w, _orig_h, _eval_w, _eval_h,
+            ssu_id_key="ssu_int",
         )
 
         for _pm in parsing_models:
@@ -645,7 +641,7 @@ def _(
                 (bbox_df["filename"] == _filename)
             ]
             _preds = boxes_to_pred_masks(
-                _pred_page.to_dict("records"), _eval_w, _eval_h, scale=_scale,
+                _pred_page.to_dict("records"), _orig_w, _orig_h, _eval_w, _eval_h,
             )
             _cote, _C, _O, _T, _E = cote_score(_ssu_map, _preds)
             _cote_records.append({

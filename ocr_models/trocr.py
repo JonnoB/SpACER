@@ -99,7 +99,7 @@ class TrOCROCR(OCRModel):
     def run(self, crop: Image.Image) -> str:
         return self.run_batch([crop])[0]
 
-    def prepare(self, crops: list) -> tuple[list[Image.Image], list[int]]:
+    def prepare(self, crops: list, metadata: list | None = None) -> tuple[list[Image.Image], list[int]]:
         """CPU phase: split each crop into individual text lines using Tesseract.
 
         Returns (expanded_crops, split_counts) where split_counts records how

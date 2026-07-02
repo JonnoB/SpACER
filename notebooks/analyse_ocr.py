@@ -9,12 +9,10 @@ def _():
     import marimo as mo
     import pandas as pd
     import io
-    import sys
     import xml.etree.ElementTree as ET
     from pathlib import Path
     from PIL import Image, ImageDraw, ImageFont
 
-    sys.path.insert(0, str(Path("..").resolve() / "cotescore/src"))
     return ET, Image, ImageDraw, ImageFont, Path, io, mo, pd
 
 
