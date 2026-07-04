@@ -20,6 +20,18 @@ DocBank page image is rendered at a fixed height of 1000px). Converted here
 via px = raw * page_dim_px / 1000 for both axes — see
 infer_characters_docbank.py, which relies on the same conversion.
 
+Non-text tokens: pdfminer emits placeholder tokens like ``##LTLine##`` /
+``##LTFigure##`` for graphical elements (rules, embedded images) that have a
+bbox and label but no real text. These are dropped entirely before
+grouping into runs (not kept as text-free regions): no OCR engine will ever
+produce that string from a pixel crop, and dropping them from the GT used
+for COTe/d_pars is the fairer choice for pure-text evaluation too — Coverage
+and Trespass (the components that actually move the composite COTe score)
+only apply to areas that are still GT-owned, so a model that ignores lines
+isn't penalized for it; a model that does predict a box over a
+now-unGT'd line area just adds to Excess, which is reported but doesn't
+move the composite score.
+
 Reads:
     data/docbank/gt_word_annotations/<basename>.txt
         Raw DocBank format: word\\tx0\\ty0\\tx1\\ty1\\tR\\tG\\tB\\tfont\\tlabel
@@ -49,11 +61,18 @@ BBOXES_OUT  = Path("data/docbank/docbank_gt_predictions.csv")
 PAGE_TEXTS  = Path("data/docbank/gt_page_texts")
 
 
+def is_placeholder_token(word: str) -> bool:
+    """pdfminer non-text markers, e.g. ##LTLine##, ##LTFigure##."""
+    return word.startswith("##") and word.endswith("##")
+
+
 def parse_word_line(line: str) -> dict | None:
     parts = line.rstrip("\n").split("\t")
     if len(parts) != 10:
         return None
     word = parts[0]
+    if is_placeholder_token(word):
+        return None
     x0, y0, x1, y1 = (int(v) for v in parts[1:5])
     label = parts[9]
     return {"word": word, "x0": x0, "y0": y0, "x1": x1, "y1": y1, "label": label}

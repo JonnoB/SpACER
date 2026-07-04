@@ -12,12 +12,22 @@ Hypothesis text is the model OCR output:
   - pm!="gt" : OCR run on predicted regions, boxes matched to GT SSUs by canvas
                 rasterisation then ordered by (ssu_n, pred_box_y, pred_box_x).
 
-Page-level text strings are also written to data/results_spiritualist/page_text/
+Page-level text strings are also written to <dataset results dir>/page_text/
 for visual inspection.
 
-Output: data/results_spiritualist/page_level_cer_comparison.parquet
+Supports spiritualist, hiertext, and docbank via --dataset (paths, filename
+prefix, and filename suffix all differ per dataset — DocBank filenames are
+"{page_id}_ori.jpg" rather than "{page_id}.jpg").
+
+Usage:
+    python scripts/page_cer_validation.py --dataset spiritualist
+    python scripts/page_cer_validation.py --dataset hiertext
+    python scripts/page_cer_validation.py --dataset docbank
+
+Output: <dataset>/page_level_cer_comparison.parquet (see DATASET_CONFIG below)
 """
 
+import argparse
 import re
 import sys
 import unicodedata
@@ -36,13 +46,50 @@ from cotescore.adapters import boxes_to_gt_ssu_map
 from jiwer import cer as jiwer_cer
 
 # ---------------------------------------------------------------------------
-# Paths
+# Per-dataset paths / filename conventions
 # ---------------------------------------------------------------------------
-_SSU_CSV = _REPO / "data/spiritualist/gt_ssu_bboxes.csv"
-_OCR_DIR       = _REPO / "data/results_spiritualist/ocr"
-_OUT           = _REPO / "data/results_spiritualist/page_level_cer_comparison.parquet"
-_TEXT_GT_DIR   = _REPO / "data/results_spiritualist/page_text/gt"
-_TEXT_PRED_DIR = _REPO / "data/results_spiritualist/page_text/pred"
+DATASET_CONFIG = {
+    "spiritualist": dict(
+        ssu_csv=       "data/spiritualist/gt_ssu_bboxes.csv",
+        ocr_dir=       "data/results_spiritualist/ocr",
+        out=           "data/results_spiritualist/page_level_cer_comparison.parquet",
+        text_gt_dir=   "data/results_spiritualist/page_text/gt",
+        text_pred_dir= "data/results_spiritualist/page_text/pred",
+        prefix=        "spiritualist",
+        filename_suffix=".jpg",
+    ),
+    "hiertext": dict(
+        ssu_csv=       "data/hiertext/gt_ssu_bboxes.csv",
+        ocr_dir=       "data/hiertext_results/ocr",
+        out=           "data/hiertext/page_level_cer_comparison.parquet",
+        text_gt_dir=   "data/hiertext/page_text/gt",
+        text_pred_dir= "data/hiertext/page_text/pred",
+        prefix=        "hiertext",
+        filename_suffix=".jpg",
+    ),
+    "docbank": dict(
+        ssu_csv=       "data/docbank/gt_ssu_bboxes.csv",
+        ocr_dir=       "data/docbank/ocr",
+        out=           "data/docbank/page_level_cer_comparison.parquet",
+        text_gt_dir=   "data/docbank/page_text/gt",
+        text_pred_dir= "data/docbank/page_text/pred",
+        prefix=        "docbank",
+        filename_suffix="_ori.jpg",
+    ),
+}
+
+_arg_parser = argparse.ArgumentParser(description=__doc__)
+_arg_parser.add_argument("--dataset", choices=sorted(DATASET_CONFIG), default="spiritualist")
+_args = _arg_parser.parse_args()
+_cfg = DATASET_CONFIG[_args.dataset]
+
+_SSU_CSV       = _REPO / _cfg["ssu_csv"]
+_OCR_DIR       = _REPO / _cfg["ocr_dir"]
+_OUT           = _REPO / _cfg["out"]
+_TEXT_GT_DIR   = _REPO / _cfg["text_gt_dir"]
+_TEXT_PRED_DIR = _REPO / _cfg["text_pred_dir"]
+_PREFIX          = _cfg["prefix"]
+_FILENAME_SUFFIX = _cfg["filename_suffix"]
 
 
 # ---------------------------------------------------------------------------
@@ -80,12 +127,16 @@ def _join_readable(texts) -> str:
     return "\n\n".join(t.strip() for t in texts if t and t.strip())
 
 
-def _ssu_n(ssu_id: str) -> int:
+def _ssu_n(ssu_id) -> int:
     """Extract reading-order index N from an ssu_id.
 
-    ssu_masthead / ssu_other_* → -1 (sorts before numbered column content).
-    ssu_N_col_M               → N
+    Numeric ssu_id (hiertext, docbank): already a document-order index, used as-is.
+    String ssu_id (spiritualist, "ssu_N_col_M" / "ssu_masthead" / "ssu_other_*"):
+      ssu_masthead / ssu_other_* → -1 (sorts before numbered column content).
+      ssu_N_col_M               → N
     """
+    if isinstance(ssu_id, (int, np.integer)):
+        return int(ssu_id)
     try:
         return int(ssu_id.split("_")[1])
     except (IndexError, ValueError):
@@ -98,28 +149,28 @@ def _ssu_n(ssu_id: str) -> int:
 print("Loading gt_ssu_bboxes.csv …")
 ssu_full = pd.read_csv(_SSU_CSV)
 if "page_id" not in ssu_full.columns:
-    ssu_full["page_id"] = ssu_full["filename"].str.removesuffix(".jpg")
+    ssu_full["page_id"] = ssu_full["filename"].str.removesuffix(_FILENAME_SUFFIX)
 ssu_full["ssu_n"] = ssu_full["ssu_id"].map(_ssu_n)
 
-# GT parsing OCR parquets (spiritualist_gt_predictions_{om}_ocr.parquet)
+# GT parsing OCR parquets ({prefix}_gt_predictions_{om}_ocr.parquet)
 print("Loading GT parsing OCR parquets …")
 gt_ocr_parts = []
-for f in sorted(_OCR_DIR.glob("spiritualist_gt_predictions_*_ocr.parquet")):
-    om   = f.stem.removeprefix("spiritualist_gt_predictions_").removesuffix("_ocr")
+for f in sorted(_OCR_DIR.glob(f"{_PREFIX}_gt_predictions_*_ocr.parquet")):
+    om   = f.stem.removeprefix(f"{_PREFIX}_gt_predictions_").removesuffix("_ocr")
     part = pd.read_parquet(f)
     part["ocr_model"]     = om
     part["parsing_model"] = "gt"
     gt_ocr_parts.append(part)
 gt_ocr_df = pd.concat(gt_ocr_parts, ignore_index=True) if gt_ocr_parts else pd.DataFrame()
 if not gt_ocr_df.empty:
-    gt_ocr_df["page_id"] = gt_ocr_df["filename"].str.removesuffix(".jpg")
+    gt_ocr_df["page_id"] = gt_ocr_df["filename"].str.removesuffix(_FILENAME_SUFFIX)
     gt_ocr_df["ssu_n"]   = gt_ocr_df["ssu_id"].map(_ssu_n)
 
-# Non-GT parsing OCR parquets (spiritualist_{pm}_predictions_{om}_ocr.parquet)
+# Non-GT parsing OCR parquets ({prefix}_{pm}_predictions_{om}_ocr.parquet)
 print("Loading non-GT parsing OCR parquets …")
 pred_ocr_parts = []
 for f in sorted(_OCR_DIR.glob("*_ocr.parquet")):
-    inner = f.stem.removeprefix("spiritualist_").removesuffix("_ocr")
+    inner = f.stem.removeprefix(f"{_PREFIX}_").removesuffix("_ocr")
     sep   = inner.index("_predictions_")
     pm    = inner[:sep]
     if pm == "gt":
@@ -131,7 +182,7 @@ for f in sorted(_OCR_DIR.glob("*_ocr.parquet")):
     pred_ocr_parts.append(part)
 pred_ocr_df = pd.concat(pred_ocr_parts, ignore_index=True) if pred_ocr_parts else pd.DataFrame()
 if not pred_ocr_df.empty:
-    pred_ocr_df["page_id"] = pred_ocr_df["filename"].str.removesuffix(".jpg")
+    pred_ocr_df["page_id"] = pred_ocr_df["filename"].str.removesuffix(_FILENAME_SUFFIX)
 
 pages          = sorted(ssu_full["page_id"].unique())
 ocr_models     = sorted(gt_ocr_df["ocr_model"].unique())      if not gt_ocr_df.empty    else []
@@ -203,7 +254,7 @@ def _match_boxes_to_ssus(
     int_to_x = dict(zip(ssu_page["_ssu_int"], ssu_page["x"]))
 
     boxes  = ssu_page[["x", "y", "width", "height", "_ssu_int"]].to_dict("records")
-    canvas = boxes_to_gt_ssu_map(boxes, img_w, img_h, ssu_id_key="_ssu_int")
+    canvas = boxes_to_gt_ssu_map(boxes, img_w, img_h, img_w, img_h, ssu_id_key="_ssu_int")
 
     matched_ssu_ns, matched_ys, matched_xs = [], [], []
     for _, row in pred_rows.iterrows():

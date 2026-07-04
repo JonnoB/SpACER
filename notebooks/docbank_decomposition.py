@@ -7,16 +7,20 @@ app = marimo.App(width="full")
 @app.cell
 def _(mo):
     mo.md(r"""
-    # HierText — SpACER / CDD decomposition
+    # DocBank — SpACER / CDD decomposition
 
-    Mirrors `notebooks/ocr_decomposition.py` (spiritualist dataset), kept as a
+    Mirrors `notebooks/ocr_decomposition.py` (spiritualist dataset) and
+    `notebooks/hiertext_decomposition.py` (HierText dataset), kept as a
     separate notebook because the underlying data lives in different files
     and paths. Requires:
 
-    - `data/hiertext/characters_inferred.parquet` — from `scripts/infer_characters_hiertext.py`
-    - `data/hiertext/gt_ssu_bboxes.csv` — from `scripts/extract_hiertext_ssu_text.py`
-    - `data/hiertext_predictions/hiertext_{parsing_model}_predictions.csv` — bbox CSVs per parsing model
-    - `data/hiertext/ocr/hiertext_{parsing_model}_predictions_{ocr_model}_ocr.parquet` — OCR outputs from `scripts/run_all_ocr.py` (point `--output-dir` there)
+    - `data/docbank/characters_inferred.parquet` — from `scripts/infer_characters_docbank.py`
+    - `data/docbank/gt_ssu_bboxes.csv` — from `scripts/extract_docbank_ssu_text.py`
+    - `data/docbank/bbox_preds/docbank_{parsing_model}_predictions.csv` — bbox CSVs per parsing model
+    - `data/docbank/ocr/docbank_{parsing_model}_predictions_{ocr_model}_ocr.parquet` — OCR outputs from `scripts/run_all_ocr.py` (point `--output-dir` there)
+
+    Note: DocBank filenames carry an `_ori` suffix (`{page_id}_ori.jpg`)
+    rather than `{page_id}.jpg` as in HierText/spiritualist.
     """)
     return
 
@@ -86,9 +90,9 @@ def _(re, unicodedata):
 @app.cell
 def _(Path, pd):
     _REPO_ROOT = Path(__file__).resolve().parent.parent
-    _CHARS_PATH = _REPO_ROOT / "data/hiertext/characters_inferred.parquet"
-    _OCR_DIR = _REPO_ROOT / "data/hiertext_results/ocr"
-    _BBOX_DIR = _REPO_ROOT / "data/hiertext_predictions"
+    _CHARS_PATH = _REPO_ROOT / "data/docbank/characters_inferred.parquet"
+    _OCR_DIR = _REPO_ROOT / "data/docbank/ocr"
+    _BBOX_DIR = _REPO_ROOT / "data/docbank/bbox_preds"
 
     chars_df = pd.read_parquet(_CHARS_PATH)
     chars_df = chars_df[chars_df["char_text"] != " "].reset_index(drop=True)
@@ -96,22 +100,22 @@ def _(Path, pd):
     chars_df["cy"] = (chars_df["y"] + chars_df["h"] / 2).astype(int)
 
     # Load GT OCR parquets (parsing_model == "gt") into a single DataFrame.
-    # Filename pattern: hiertext_gt_predictions_{ocr_model}_ocr.parquet
+    # Filename pattern: docbank_gt_predictions_{ocr_model}_ocr.parquet
     # Schema: filename, ssu_id, ocr_text
     _gt_parts = []
-    for _f in sorted(_OCR_DIR.glob("hiertext_gt_predictions_*_ocr.parquet")):
-        _om = _f.stem.removeprefix("hiertext_gt_predictions_").removesuffix("_ocr")
+    for _f in sorted(_OCR_DIR.glob("docbank_gt_predictions_*_ocr.parquet")):
+        _om = _f.stem.removeprefix("docbank_gt_predictions_").removesuffix("_ocr")
         _part = pd.read_parquet(_f)
         _part["ocr_model"] = _om
         _gt_parts.append(_part)
     gt_ocr_df = pd.concat(_gt_parts, ignore_index=True) if _gt_parts else pd.DataFrame()
 
     # Load prediction OCR parquets (non-GT parsing models) into a single DataFrame.
-    # Filename pattern: hiertext_{parsing_model}_predictions_{ocr_model}_ocr.parquet
+    # Filename pattern: docbank_{parsing_model}_predictions_{ocr_model}_ocr.parquet
     # Schema: filename, x, y, width, height, ocr_text
     _pred_parts = []
     for _f in sorted(_OCR_DIR.glob("*_ocr.parquet")):
-        _inner = _f.stem.removeprefix("hiertext_").removesuffix("_ocr")
+        _inner = _f.stem.removeprefix("docbank_").removesuffix("_ocr")
         _sep = _inner.index("_predictions_")
         _pm = _inner[:_sep]
         if _pm == "gt":
@@ -124,11 +128,11 @@ def _(Path, pd):
     pred_ocr_df = pd.concat(_pred_parts, ignore_index=True) if _pred_parts else pd.DataFrame()
 
     # Load all bbox CSVs into a single DataFrame.
-    # Filename pattern: hiertext_{parsing_model}_predictions.csv
+    # Filename pattern: docbank_{parsing_model}_predictions.csv
     # Schema: filename, x, y, width, height
     _bbox_parts = []
     for _f in sorted(_BBOX_DIR.glob("*.csv")):
-        _pm = _f.stem.removeprefix("hiertext_").removesuffix("_predictions")
+        _pm = _f.stem.removeprefix("docbank_").removesuffix("_predictions")
         _part = pd.read_csv(_f)
         _part["parsing_model"] = _pm
         _bbox_parts.append(_part)
@@ -145,6 +149,7 @@ def _(Path, pd):
         "paddleocr":  "PaddleOCR",
         "tesseract":  "Tesseract",
         "craft":      "CRAFT",
+        "easyocr":    "EasyOCR",
         # Parsing models
         "heron":      "Heron",
         "ppdocl":     "PPDoc-L",
@@ -199,10 +204,12 @@ def _(
       gt_ocr_df columns: ocr_model, filename, ssu_id, ocr_text
       pred_ocr_df columns: parsing_model, ocr_model, filename, x, y, width, height, ocr_text
       bbox_df columns: parsing_model, filename, x, y, width, height
+
+    DocBank filenames are "{page_id}_ori.jpg" (not "{page_id}.jpg").
     """
 
     _REPO_ROOT = Path(__file__).resolve().parent.parent
-    _RESULTS_CACHE = _REPO_ROOT / "data/hiertext/decomposition_results.parquet"
+    _RESULTS_CACHE = _REPO_ROOT / "data/docbank/decomposition_results.parquet"
 
     if _RESULTS_CACHE.exists():
         results_df = pd.read_parquet(_RESULTS_CACHE)
@@ -233,7 +240,7 @@ def _(
             for _pm in parsing_models:
                 _bbox_page = bbox_df.loc[
                     (bbox_df["parsing_model"] == _pm) &
-                    (bbox_df["filename"] == f"{_page}.jpg")
+                    (bbox_df["filename"] == f"{_page}_ori.jpg")
                 ].reset_index(drop=True)
 
                 _bbox_arr = _bbox_page[["x", "y", "width", "height"]].to_numpy(dtype=float)
@@ -247,7 +254,7 @@ def _(
                     # GT OCR: {ssu_int -> ocr_text} from OCR on GT regions
                     _gt_page_ocr = gt_ocr_df.loc[
                         (gt_ocr_df["ocr_model"] == _om) &
-                        (gt_ocr_df["filename"] == f"{_page}.jpg")
+                        (gt_ocr_df["filename"] == f"{_page}_ori.jpg")
                     ]
                     if not _gt_page_ocr.empty:
                         _pred_gt_ocr = {
@@ -268,7 +275,7 @@ def _(
                         _pred_page_ocr = pred_ocr_df.loc[
                             (pred_ocr_df["parsing_model"] == _pm) &
                             (pred_ocr_df["ocr_model"] == _om) &
-                            (pred_ocr_df["filename"] == f"{_page}.jpg")
+                            (pred_ocr_df["filename"] == f"{_page}_ori.jpg")
                         ]
                         if not _pred_page_ocr.empty:
                             _pred_parse_ocr = {
@@ -406,8 +413,8 @@ def _(
     for the mask-mode agreement tests this relies on).
     """
     _REPO_ROOT = Path(__file__).resolve().parent.parent
-    _GT_BBOXES_PATH = _REPO_ROOT / "data/hiertext/gt_ssu_bboxes.csv"
-    _COTE_CACHE_PATH = _REPO_ROOT / "data/hiertext/cote_score_cache.parquet"
+    _GT_BBOXES_PATH = _REPO_ROOT / "data/docbank/gt_ssu_bboxes.csv"
+    _COTE_CACHE_PATH = _REPO_ROOT / "data/docbank/cote_score_cache.parquet"
 
     if _COTE_CACHE_PATH.exists():
         cote_df = pd.read_parquet(_COTE_CACHE_PATH)
@@ -418,7 +425,7 @@ def _(
         _gt_ssu_df["ssu_int"] = _ssu_codes + 1
         _cote_records = []
         for _filename, _gt_page in _gt_ssu_df.groupby("filename"):
-            _page_id = Path(_filename).stem
+            _page_id = _filename.removesuffix("_ori.jpg")
             _orig_w = int(_gt_page["image_width"].iloc[0])
             _orig_h = int(_gt_page["image_height"].iloc[0])
             _gt_boxes = GTBoxes(
@@ -463,7 +470,7 @@ def _(
         ),
         caption=r"COTe score and components by parsing model. "
                 r"Higher is better for COTe and Coverage; lower is better for Overlap, Trespass, Excess.",
-        label="tab:hiertext_cote",
+        label="tab:docbank_cote",
     )
     mo.vstack([
         mo.md("### COTe score — mean by parsing model"),
@@ -492,7 +499,7 @@ def _(Path, bbox_df, mo, np, parsing_models, pd):
         return np.where(union > 0, inter / union, 0.0)
 
     _REPO_ROOT = Path(__file__).resolve().parent.parent
-    _gt_ssu_df = pd.read_csv(_REPO_ROOT / "data/hiertext/gt_ssu_bboxes.csv")
+    _gt_ssu_df = pd.read_csv(_REPO_ROOT / "data/docbank/gt_ssu_bboxes.csv")
 
     _map_records = []
     for _pm in [pm for pm in parsing_models if pm != "gt"]:
@@ -562,7 +569,7 @@ def _(bold_best_cols, box_df, display_name, latex_table, mo, results_df):
         caption=r"OCR error ($d_\text{ocr}$) by OCR model, averaged over pages using GT regions. "
                 r"SpACER macro is the primary metric; lower is better. "
                 r"CER is computed at GT bounding-box level.",
-        label="tab:hiertext_d_ocr",
+        label="tab:docbank_d_ocr",
     )
 
     mo.vstack([mo.md("### $d_\\text{ocr}$ — mean by OCR model"), mo.ui.table(d_ocr_table, selection=None)])
@@ -606,7 +613,7 @@ def _(
         ),
         caption=r"Parsing error ($d_\text{pars}$) by parsing model with COTe and mAP@0.5. "
                 r"SpACER macro is the primary metric; lower is better for SpACER/CDD, higher for COTe/mAP.",
-        label="tab:hiertext_d_pars",
+        label="tab:docbank_d_pars",
     )
 
     mo.vstack([mo.md("### $d_\\text{pars}$ — median by parsing model"), mo.ui.table(d_pars_table, selection=None)])
@@ -635,7 +642,7 @@ def _(bold_best_pivot, display_name, latex_table, mo, results_df):
         bold_best_pivot(_d_int_spacer_macro, lower_is_better=True),
         caption=r"Interaction error ($d_\text{int}$, SpACER macro) by parsing model (rows) "
                 r"and OCR model (columns). \textbf{Bold}: column best; \textbf{bold}$^*$: overall best.",
-        label="tab:hiertext_d_int",
+        label="tab:docbank_d_int",
     )
 
     mo.vstack([
@@ -669,7 +676,7 @@ def _(bold_best_pivot, display_name, latex_table, mo, results_df):
         bold_best_pivot(_d_total_spacer_macro, lower_is_better=True),
         caption=r"Total error ($d_\text{total}$, SpACER macro) by parsing model (rows) "
                 r"and OCR model (columns). \textbf{Bold}: column best; \textbf{bold}$^*$: overall best.",
-        label="tab:hiertext_d_total",
+        label="tab:docbank_d_total",
     )
 
     mo.vstack([
@@ -748,7 +755,7 @@ def _(bold_best_cols, cote_df, display_name, latex_table, mo, pd, results_df):
                 r"and COTe score by parsing model. Negative $\rho$ indicates that "
                 r"higher COTe (better parsing geometry) corresponds to lower parsing error, "
                 r"as expected.",
-        label="tab:hiertext_dpars_cote_spearman",
+        label="tab:docbank_dpars_cote_spearman",
     )
 
     _lines = ["**Spearman correlation: d_pars vs COTe**\n"]
@@ -796,7 +803,7 @@ def _(
 
     # Extract page_id from filename and clean OCR text
     _ocr = gt_ocr_df.copy()
-    _ocr["page"] = _ocr["filename"].str.removesuffix(".jpg")
+    _ocr["page"] = _ocr["filename"].str.removesuffix("_ori.jpg")
     _ocr["ocr_text"] = _ocr["ocr_text"].str.split().str.join("")
 
     # Merge GT text with OCR text on (page, ssu_id)
@@ -860,7 +867,7 @@ def _(bold_best_cols, box_df, display_name, latex_table, mo, pd, spearmanr):
         caption=r"Spearman correlation ($\rho$) between per-box CER and $d_\text{ocr}$ "
                 r"for SpACER (primary) and CDD, computed over GT regions. "
                 r"All correlations significant at $p < 0.001$.",
-        label="tab:hiertext_cer_spearman",
+        label="tab:docbank_cer_spearman",
     )
 
     _lines = ["**Spearman correlation: CER vs per-box d_ocr metrics**\n"]

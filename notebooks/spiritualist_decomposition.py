@@ -169,6 +169,7 @@ def _(Path, pd):
 @app.cell
 def _(
     Counter,
+    Path,
     RegionChars,
     bbox_df,
     build_R_spatial,
@@ -186,6 +187,10 @@ def _(
 ):
     """Precompute CDD and SpACER decompositions for all pages and model combinations.
 
+    Cached to disk since this loop is expensive (nested over pages × parsing
+    models × OCR models). Delete the cache file to force a recompute after
+    adding new OCR results or parsing models.
+
     Data assumptions:
       chars_df columns: char_text, cx, cy, ssu_id, page_id
       gt_ocr_df columns: ocr_model, filename, ssu_id, ocr_text
@@ -193,112 +198,122 @@ def _(
       bbox_df columns: parsing_model, filename, x, y, width, height
     """
 
-    def _join_ocr_text(texts):
-        return normalize_for_cer(" ".join(texts).replace(" ", ""))
+    _REPO_ROOT = Path(__file__).resolve().parent.parent
+    _RESULTS_CACHE = _REPO_ROOT / "data/spiritualist/decomposition_results.parquet"
 
-    def _bbox_key(x, y, w, h):
-        return (int(x), int(y), int(w), int(h))
+    if _RESULTS_CACHE.exists():
+        results_df = pd.read_parquet(_RESULTS_CACHE)
+        print(f"Loaded cached decomposition results: {len(results_df):,} rows from {_RESULTS_CACHE}")
+    else:
+        def _join_ocr_text(texts):
+            return normalize_for_cer(" ".join(texts).replace(" ", ""))
 
-    from tqdm import tqdm
+        def _bbox_key(x, y, w, h):
+            return (int(x), int(y), int(w), int(h))
 
-    _records = []
-    for _page in tqdm(pages, desc="pages"):
-        _chars_page = chars_df[chars_df["page_id"] == _page]
+        from tqdm import tqdm
 
-        _ssu_codes, _ssu_uniques = pd.factorize(_chars_page["ssu_id"])
-        _ssu_to_int = {s: i for i, s in enumerate(_ssu_uniques)}
+        _records = []
+        for _page in tqdm(pages, desc="pages"):
+            _chars_page = chars_df[chars_df["page_id"] == _page]
 
-        _gt_chars = RegionChars(
-            tokens=np.array([normalize_for_cer(c) for c in _chars_page["char_text"]], dtype=object),
-            xs=_chars_page["cx"].to_numpy(dtype=np.intp),
-            ys=_chars_page["cy"].to_numpy(dtype=np.intp),
-            region_ids=_ssu_codes.astype(np.intp),
-        )
+            _ssu_codes, _ssu_uniques = pd.factorize(_chars_page["ssu_id"])
+            _ssu_to_int = {s: i for i, s in enumerate(_ssu_uniques)}
 
-        for _pm in parsing_models:
-            _bbox_page = bbox_df.loc[
-                (bbox_df["parsing_model"] == _pm) &
-                (bbox_df["filename"] == f"{_page}.jpg")
-            ].reset_index(drop=True)
+            _gt_chars = RegionChars(
+                tokens=np.array([normalize_for_cer(c) for c in _chars_page["char_text"]], dtype=object),
+                xs=_chars_page["cx"].to_numpy(dtype=np.intp),
+                ys=_chars_page["cy"].to_numpy(dtype=np.intp),
+                region_ids=_ssu_codes.astype(np.intp),
+            )
 
-            _bbox_arr = _bbox_page[["x", "y", "width", "height"]].to_numpy(dtype=float)
+            for _pm in parsing_models:
+                _bbox_page = bbox_df.loc[
+                    (bbox_df["parsing_model"] == _pm) &
+                    (bbox_df["filename"] == f"{_page}.jpg")
+                ].reset_index(drop=True)
 
-            _bbox_key_to_id = {
-                _bbox_key(r["x"], r["y"], r["width"], r["height"]): i
-                for i, r in enumerate(_bbox_page.to_dict("records"))
-            }
+                _bbox_arr = _bbox_page[["x", "y", "width", "height"]].to_numpy(dtype=float)
 
-            for _om in ocr_models:
-                # GT OCR: {ssu_int -> ocr_text} from OCR on GT regions
-                _gt_page_ocr = gt_ocr_df.loc[
-                    (gt_ocr_df["ocr_model"] == _om) &
-                    (gt_ocr_df["filename"] == f"{_page}.jpg")
-                ]
-                if not _gt_page_ocr.empty:
-                    _pred_gt_ocr = {
-                        _ssu_to_int[row["ssu_id"]]: _join_ocr_text(row["ocr_text"].split())
-                        for _, row in _gt_page_ocr.iterrows()
-                        if row["ssu_id"] in _ssu_to_int
-                    }
-                else:
-                    _pred_gt_ocr = {}
+                _bbox_key_to_id = {
+                    _bbox_key(r["x"], r["y"], r["width"], r["height"]): i
+                    for i, r in enumerate(_bbox_page.to_dict("records"))
+                }
 
-                # Prediction OCR: {bbox_id -> ocr_text} matched by integer coordinates.
-                # For "gt" parsing, regions are identical to the GT SSU boxes so there
-                # are no predicted-region OCR files; _pred_parse_ocr = {} correctly
-                # yields d_pars ≈ 0, d_int ≈ 0, d_total ≈ d_ocr (perfect-parsing baseline).
-                if _pm == "gt":
-                    _pred_parse_ocr = {}
-                else:
-                    _pred_page_ocr = pred_ocr_df.loc[
-                        (pred_ocr_df["parsing_model"] == _pm) &
-                        (pred_ocr_df["ocr_model"] == _om) &
-                        (pred_ocr_df["filename"] == f"{_page}.jpg")
+                for _om in ocr_models:
+                    # GT OCR: {ssu_int -> ocr_text} from OCR on GT regions
+                    _gt_page_ocr = gt_ocr_df.loc[
+                        (gt_ocr_df["ocr_model"] == _om) &
+                        (gt_ocr_df["filename"] == f"{_page}.jpg")
                     ]
-                    if not _pred_page_ocr.empty:
-                        _pred_parse_ocr = {
-                            _bbox_key_to_id[_k]: _join_ocr_text(row["ocr_text"].split())
-                            for _, row in _pred_page_ocr.iterrows()
-                            if (_k := _bbox_key(row["x"], row["y"], row["width"], row["height"])) in _bbox_key_to_id
+                    if not _gt_page_ocr.empty:
+                        _pred_gt_ocr = {
+                            _ssu_to_int[row["ssu_id"]]: _join_ocr_text(row["ocr_text"].split())
+                            for _, row in _gt_page_ocr.iterrows()
+                            if row["ssu_id"] in _ssu_to_int
                         }
                     else:
+                        _pred_gt_ocr = {}
+
+                    # Prediction OCR: {bbox_id -> ocr_text} matched by integer coordinates.
+                    # For "gt" parsing, regions are identical to the GT SSU boxes so there
+                    # are no predicted-region OCR files; _pred_parse_ocr = {} correctly
+                    # yields d_pars ≈ 0, d_int ≈ 0, d_total ≈ d_ocr (perfect-parsing baseline).
+                    if _pm == "gt":
                         _pred_parse_ocr = {}
+                    else:
+                        _pred_page_ocr = pred_ocr_df.loc[
+                            (pred_ocr_df["parsing_model"] == _pm) &
+                            (pred_ocr_df["ocr_model"] == _om) &
+                            (pred_ocr_df["filename"] == f"{_page}.jpg")
+                        ]
+                        if not _pred_page_ocr.empty:
+                            _pred_parse_ocr = {
+                                _bbox_key_to_id[_k]: _join_ocr_text(row["ocr_text"].split())
+                                for _, row in _pred_page_ocr.iterrows()
+                                if (_k := _bbox_key(row["x"], row["y"], row["width"], row["height"])) in _bbox_key_to_id
+                            }
+                        else:
+                            _pred_parse_ocr = {}
 
-                _cdd = cdd_decomp_spatial(_gt_chars, _bbox_arr, _pred_gt_ocr, _pred_parse_ocr)
-                _sp = spacer_decomp_spatial(_gt_chars, _bbox_arr, _pred_gt_ocr, _pred_parse_ocr)
+                    _cdd = cdd_decomp_spatial(_gt_chars, _bbox_arr, _pred_gt_ocr, _pred_parse_ocr)
+                    _sp = spacer_decomp_spatial(_gt_chars, _bbox_arr, _pred_gt_ocr, _pred_parse_ocr)
 
-                _Q = Counter(_gt_chars.tokens.tolist())
-                _R_agg, _ = build_R_spatial(_gt_chars, _bbox_arr)
+                    _Q = Counter(_gt_chars.tokens.tolist())
+                    _R_agg, _ = build_R_spatial(_gt_chars, _bbox_arr)
 
-                _records.append({
-                    "page": _page,
-                    "parsing_model": _pm,
-                    "ocr_model": _om,
-                    "n_gt_chars": sum(_Q.values()),
-                    "n_captured_chars": sum(_R_agg.values()),
-                    "n_predicted_boxes": len(_bbox_arr),
-                    # CDD (sqrt-JSD based)
-                    "d_pars_cdd": _cdd.d_pars,
-                    "d_ocr_cdd": _cdd.d_ocr,
-                    "d_int_cdd": _cdd.d_int,
-                    "d_total_cdd": _cdd.d_total,
-                    # SpACER macro (dominant metric)
-                    "d_pars_spacer_macro": _sp.d_pars_macro,
-                    "d_ocr_spacer_macro": _sp.d_ocr_macro,
-                    "d_int_spacer_macro": _sp.d_int_macro,
-                    "d_total_spacer_macro": _sp.d_total_macro,
-                    # SpACER micro (supporting metric; d_pars_micro is always None with spatial API)
-                    "d_ocr_spacer_micro": _sp.d_ocr_micro,
-                    "d_int_spacer_micro": _sp.d_int_micro,
-                    "d_total_spacer_micro": _sp.d_total_micro,
-                })
+                    _records.append({
+                        "page": _page,
+                        "parsing_model": _pm,
+                        "ocr_model": _om,
+                        "n_gt_chars": sum(_Q.values()),
+                        "n_captured_chars": sum(_R_agg.values()),
+                        "n_predicted_boxes": len(_bbox_arr),
+                        # CDD (sqrt-JSD based)
+                        "d_pars_cdd": _cdd.d_pars,
+                        "d_ocr_cdd": _cdd.d_ocr,
+                        "d_int_cdd": _cdd.d_int,
+                        "d_total_cdd": _cdd.d_total,
+                        # SpACER macro (dominant metric)
+                        "d_pars_spacer_macro": _sp.d_pars_macro,
+                        "d_ocr_spacer_macro": _sp.d_ocr_macro,
+                        "d_int_spacer_macro": _sp.d_int_macro,
+                        "d_total_spacer_macro": _sp.d_total_macro,
+                        # SpACER micro (supporting metric; d_pars_micro is always None with spatial API)
+                        "d_ocr_spacer_micro": _sp.d_ocr_micro,
+                        "d_int_spacer_micro": _sp.d_int_micro,
+                        "d_total_spacer_micro": _sp.d_total_micro,
+                    })
 
-    results_df = pd.DataFrame(_records)
+        results_df = pd.DataFrame(_records)
+        _RESULTS_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        results_df.to_parquet(_RESULTS_CACHE, index=False)
+        print(f"Computed and cached decomposition results: {len(results_df):,} rows -> {_RESULTS_CACHE}")
 
     results_df['pars_int'] = results_df['d_int_spacer_macro'] + results_df['d_pars_spacer_macro']
     results_df['pars_int_over_ocr'] = results_df['pars_int'] / results_df['d_ocr_spacer_macro']
     results_df['total_over_two_ocr'] =  results_df['d_total_spacer_macro'] /(2*results_df['d_ocr_spacer_macro'])
-    results_df['ocr_over_total'] =  results_df['d_ocr_spacer_macro'] / results_df['d_total_spacer_macro'] 
+    results_df['ocr_over_total'] =  results_df['d_ocr_spacer_macro'] / results_df['d_total_spacer_macro']
     return (results_df,)
 
 
