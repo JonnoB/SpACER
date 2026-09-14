@@ -134,6 +134,12 @@ def _(Path, pd):
         _bbox_parts.append(_part)
     bbox_df = pd.concat(_bbox_parts, ignore_index=True)
 
+    # Non-gt prediction CSVs have the full GT box set concatenated in
+    # (source == "gt"); score only the real predictions. The gt-baseline
+    # file has no source column (NaN after concat), so it is preserved.
+    if "source" in bbox_df.columns:
+        bbox_df = bbox_df[bbox_df["source"] != "gt"].reset_index(drop=True)
+
     parsing_models = sorted(bbox_df["parsing_model"].unique())
     ocr_models = sorted(pred_ocr_df["ocr_model"].unique()) if not pred_ocr_df.empty else []
     pages = sorted(chars_df["page_id"].unique())
@@ -774,6 +780,7 @@ def _(gt_ocr_df):
 @app.cell
 def _(
     Counter,
+    Path,
     cdd_decomp,
     chars_df,
     gt_ocr_df,
@@ -781,42 +788,61 @@ def _(
     mo,
     normalize_for_cer,
     p9,
+    pd,
     spacer,
 ):
-    """Per-box CER vs d_ocr SpACER/CDD — merge-based, no loops."""
+    """Per-box CER vs d_ocr SpACER/CDD — merge-based, no loops.
 
-    # GT text per SSU box: concatenate char_text within each (page_id, ssu_id)
-    _gt_text_df = (
-        chars_df.groupby(["page_id", "ssu_id"])["char_text"]
-        .apply("".join)
-        .reset_index()
-        .rename(columns={"char_text": "gt_text", "page_id": "page"})
-    )
-    _gt_text_df = _gt_text_df[_gt_text_df["gt_text"] != ""]
+    Cached to disk: one row per (page, ssu_id, ocr_model), with a row-wise
+    apply of jiwer_cer/spacer/cdd_decomp per OCR-model group — this is the
+    most expensive uncached step for hiertext (tens of thousands of SSUs
+    x OCR models), and the combined cross-dataset validation notebook reads
+    this cache directly rather than recomputing it. Delete the cache file
+    to force a recompute after adding new OCR results.
+    """
+    _REPO_ROOT = Path(__file__).resolve().parent.parent
+    _BOX_CACHE = _REPO_ROOT / "data/hiertext/box_level_ocr_comparison.parquet"
 
-    # Extract page_id from filename and clean OCR text
-    _ocr = gt_ocr_df.copy()
-    _ocr["page"] = _ocr["filename"].str.removesuffix(".jpg")
-    _ocr["ocr_text"] = _ocr["ocr_text"].str.split().str.join("")
+    if _BOX_CACHE.exists():
+        box_df = pd.read_parquet(_BOX_CACHE)
+        print(f"Loaded cached box-level comparison: {len(box_df):,} rows from {_BOX_CACHE}")
+    else:
+        # GT text per SSU box: concatenate char_text within each (page_id, ssu_id)
+        _gt_text_df = (
+            chars_df.groupby(["page_id", "ssu_id"])["char_text"]
+            .apply("".join)
+            .reset_index()
+            .rename(columns={"char_text": "gt_text", "page_id": "page"})
+        )
+        _gt_text_df = _gt_text_df[_gt_text_df["gt_text"] != ""]
 
-    # Merge GT text with OCR text on (page, ssu_id)
-    box_df = _gt_text_df.merge(
-        _ocr[["page", "ssu_id", "ocr_model", "ocr_text"]],
-        on=["page", "ssu_id"],
-    )
-    box_df["gt_len"] = box_df["gt_text"].str.len()
+        # Extract page_id from filename and clean OCR text
+        _ocr = gt_ocr_df.copy()
+        _ocr["page"] = _ocr["filename"].str.removesuffix(".jpg")
+        _ocr["ocr_text"] = _ocr["ocr_text"].str.split().str.join("")
 
-    # Compute per-box metrics with apply (jiwer_cer list form returns aggregate, not per-row)
-    box_df["cer"] = box_df.apply(
-        lambda r: jiwer_cer(normalize_for_cer(r["gt_text"]), normalize_for_cer(r["ocr_text"])), axis=1
-    )
-    box_df["d_ocr_spacer"] = box_df.apply(
-        lambda r: spacer(Counter(normalize_for_cer(r["gt_text"])), Counter(normalize_for_cer(r["ocr_text"]))), axis=1
-    )
-    box_df["d_ocr_cdd"] = box_df.apply(
-        lambda r: cdd_decomp({"gt": normalize_for_cer(r["gt_text"]), "ocr": normalize_for_cer(r["ocr_text"])}).d_ocr,
-        axis=1,
-    )
+        # Merge GT text with OCR text on (page, ssu_id)
+        box_df = _gt_text_df.merge(
+            _ocr[["page", "ssu_id", "ocr_model", "ocr_text"]],
+            on=["page", "ssu_id"],
+        )
+        box_df["gt_len"] = box_df["gt_text"].str.len()
+
+        # Compute per-box metrics with apply (jiwer_cer list form returns aggregate, not per-row)
+        box_df["cer"] = box_df.apply(
+            lambda r: jiwer_cer(normalize_for_cer(r["gt_text"]), normalize_for_cer(r["ocr_text"])), axis=1
+        )
+        box_df["d_ocr_spacer"] = box_df.apply(
+            lambda r: spacer(Counter(normalize_for_cer(r["gt_text"])), Counter(normalize_for_cer(r["ocr_text"]))), axis=1
+        )
+        box_df["d_ocr_cdd"] = box_df.apply(
+            lambda r: cdd_decomp({"gt": normalize_for_cer(r["gt_text"]), "ocr": normalize_for_cer(r["ocr_text"])}).d_ocr,
+            axis=1,
+        )
+
+        _BOX_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        box_df.to_parquet(_BOX_CACHE, index=False)
+        print(f"Computed and cached box-level comparison: {len(box_df):,} rows -> {_BOX_CACHE}")
 
     _plt2 = (
         p9.ggplot(box_df, p9.aes(x="cer", y="d_ocr_spacer"))

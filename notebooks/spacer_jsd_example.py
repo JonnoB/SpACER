@@ -146,12 +146,13 @@ def _(Q, R, jsd_distance, mo, spacer):
     | Metric | d\\_pars | Range | Interpretation |
     |--------|---------|-------|----------------|
     | JSD distance | `{_jsd:.4f}` | [0, 1] | Distributional shift Q → R |
-    | SpACER | `{_sp:.4f}` | [0, ∞) | Count-based error, deletion-sensitive |
+    | SpACER | `{_sp:.4f}` | [0, ∞) | Count-based error, sensitive to net deletions and insertions |
 
     **JSD** measures the shape difference between Q and R as probability
     distributions — insensitive to the total count, only the relative proportions matter.
 
-    **SpACER** responds to absolute count differences (Ê) and net deletions (D).
+    **SpACER** responds to absolute count differences (Ê) plus net deletions (D)
+    and net insertions (I): $(\hat{E} + D + I) / 2C$.
     Because `build_R_from_region_pixels` can double-count characters in overlapping
     boxes, R may exceed Q in total count. A SpACER > 0 here reflects the
     character-level count mismatch caused by that overlap, not missing characters.

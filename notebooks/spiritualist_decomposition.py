@@ -41,8 +41,8 @@ def _():
         build_R_spatial,
         cdd_decomp,
         cdd_decomp_spatial,
-        cote_score,
         compute_canvas,
+        cote_score,
         jiwer_cer,
         mo,
         np,
@@ -129,6 +129,13 @@ def _(Path, pd):
         _part["parsing_model"] = _pm
         _bbox_parts.append(_part)
     bbox_df = pd.concat(_bbox_parts, ignore_index=True)
+
+    # Non-gt prediction CSVs may have the full GT box set concatenated in
+    # (source == "gt"); score only the real predictions. The gt-baseline
+    # file has no source column (NaN after concat), so it is preserved.
+    # (Spiritualist files are already pred-only; this is defensive.)
+    if "source" in bbox_df.columns:
+        bbox_df = bbox_df[bbox_df["source"] != "gt"].reset_index(drop=True)
 
     parsing_models = sorted(bbox_df["parsing_model"].unique())
     ocr_models = sorted(pred_ocr_df["ocr_model"].unique()) if not pred_ocr_df.empty else []
@@ -365,21 +372,34 @@ def _():
         return result
 
     def latex_table(df, caption, label, col_fmt=None):
-        """Print a booktabs LaTeX table (escape=False, position=t)."""
+        """Print a centered, bold-header booktabs LaTeX table (position=htbp).
+
+        The index is folded into the header row as a plain leading column
+        (rather than pandas's default separate index-name row) to match a
+        single-header-row style: \\textbf{Row} & \\textbf{Col1} & ... .
+        """
+        _df = df.reset_index()
+        col_fmt = col_fmt or ("l" + "c" * (_df.shape[1] - 1))
+        _headers = [r"\textbf{{" + str(c) + "}}" for c in _df.columns]
         kwargs = dict(
+            index=False,
+            header=_headers,
             caption=caption,
             label=label,
             escape=False,
-            position="t",
+            position="htbp",
+            column_format=col_fmt,
             float_format="%.3f",
         )
-        if col_fmt:
-            kwargs["column_format"] = col_fmt
         # Replace \hline with booktabs rules (\toprule, \midrule, \bottomrule)
         _hline_count = 0
         _lines = []
-        for _line in df.to_latex(**kwargs).split("\n"):
-            if _line.strip() == r"\hline":
+        for _line in _df.to_latex(**kwargs).split("\n"):
+            _stripped = _line.strip()
+            if _stripped.startswith(r"\begin{table}"):
+                _lines.append(_line)
+                _lines.append(r"\centering")
+            elif _stripped == r"\hline":
                 _hline_count += 1
                 _lines.append(
                     r"\toprule" if _hline_count == 1
@@ -420,6 +440,7 @@ def _(bold_best_cols, box_df, display_name, latex_table, mo, results_df):
         .rename(index=display_name)
         .round(4)
     )
+    d_ocr_table.index.name = "OCR Model"
 
     latex_table(
         bold_best_cols(
@@ -464,6 +485,7 @@ def _(
         .rename(index=display_name)
         .round(4)
     )
+    d_pars_table.index.name = "Parsing Model"
 
     latex_table(
         bold_best_cols(
@@ -497,6 +519,7 @@ def _(bold_best_pivot, display_name, latex_table, mo, results_df):
     _d_int_spacer_macro = _pivot("d_int_spacer_macro")
     _d_int_spacer_micro = _pivot("d_int_spacer_micro")
     _d_int_cdd = _pivot("d_int_cdd")
+    _d_int_spacer_macro.index.name = "Parsing Model"
 
     latex_table(
         bold_best_pivot(_d_int_spacer_macro, lower_is_better=True),
@@ -531,6 +554,7 @@ def _(bold_best_pivot, display_name, latex_table, mo, results_df):
     _d_total_spacer_macro = _pivot("d_total_spacer_macro")
     _d_total_spacer_micro = _pivot("d_total_spacer_micro")
     _d_total_cdd = _pivot("d_total_cdd")
+    _d_total_spacer_macro.index.name = "Parsing Model"
 
     latex_table(
         bold_best_pivot(_d_total_spacer_macro, lower_is_better=True),
@@ -618,9 +642,9 @@ def _(
     bold_best_cols,
     boxes_to_gt_ssu_map,
     boxes_to_pred_masks,
+    compute_canvas,
     cote_score,
     display_name,
-    compute_canvas,
     latex_table,
     mo,
     parsing_models,
@@ -679,6 +703,7 @@ def _(
     )
 
     _cote_display = cote_table.rename(index=display_name)
+    _cote_display.index.name = "Parsing Model"
     latex_table(
         bold_best_cols(
             _cote_display,
@@ -811,6 +836,7 @@ def _(bold_best_cols, cote_df, display_name, latex_table, mo, pd, results_df):
         .set_index("parsing_model")
         .rename(index=display_name)
     )
+    _corr_df.index.name = "Parsing Model"
 
     latex_table(
         bold_best_cols(_corr_df, lower_cols=["SpACER $\\rho$", "CDD $\\rho$"]),
@@ -838,6 +864,7 @@ def _(bold_best_cols, cote_df, display_name, latex_table, mo, pd, results_df):
 @app.cell
 def _(
     Counter,
+    Path,
     cdd_decomp,
     chars_df,
     gt_ocr_df,
@@ -845,42 +872,60 @@ def _(
     mo,
     normalize_for_cer,
     p9,
+    pd,
     spacer,
 ):
-    """Per-box CER vs d_ocr SpACER/CDD — merge-based, no loops."""
+    """Per-box CER vs d_ocr SpACER/CDD — merge-based, no loops.
 
-    # GT text per SSU box: concatenate char_text within each (page_id, ssu_id)
-    _gt_text_df = (
-        chars_df.groupby(["page_id", "ssu_id"])["char_text"]
-        .apply("".join)
-        .reset_index()
-        .rename(columns={"char_text": "gt_text", "page_id": "page"})
-    )
-    _gt_text_df = _gt_text_df[_gt_text_df["gt_text"] != ""]
+    Cached to disk: one row per (page, ssu_id, ocr_model), with a row-wise
+    apply of jiwer_cer/spacer/cdd_decomp per OCR-model group — the combined
+    cross-dataset validation notebook reads this cache directly rather than
+    recomputing it. Delete the cache file to force a recompute after adding
+    new OCR results.
+    """
+    _REPO_ROOT = Path(__file__).resolve().parent.parent
+    _BOX_CACHE = _REPO_ROOT / "data/spiritualist/box_level_ocr_comparison.parquet"
 
-    # Extract page_id from filename and clean OCR text
-    _ocr = gt_ocr_df.copy()
-    _ocr["page"] = _ocr["filename"].str.removesuffix(".jpg")
-    _ocr["ocr_text"] = _ocr["ocr_text"].str.split().str.join("")
+    if _BOX_CACHE.exists():
+        box_df = pd.read_parquet(_BOX_CACHE)
+        print(f"Loaded cached box-level comparison: {len(box_df):,} rows from {_BOX_CACHE}")
+    else:
+        # GT text per SSU box: concatenate char_text within each (page_id, ssu_id)
+        _gt_text_df = (
+            chars_df.groupby(["page_id", "ssu_id"])["char_text"]
+            .apply("".join)
+            .reset_index()
+            .rename(columns={"char_text": "gt_text", "page_id": "page"})
+        )
+        _gt_text_df = _gt_text_df[_gt_text_df["gt_text"] != ""]
 
-    # Merge GT text with OCR text on (page, ssu_id)
-    box_df = _gt_text_df.merge(
-        _ocr[["page", "ssu_id", "ocr_model", "ocr_text"]],
-        on=["page", "ssu_id"],
-    )
-    box_df["gt_len"] = box_df["gt_text"].str.len()
+        # Extract page_id from filename and clean OCR text
+        _ocr = gt_ocr_df.copy()
+        _ocr["page"] = _ocr["filename"].str.removesuffix(".jpg")
+        _ocr["ocr_text"] = _ocr["ocr_text"].str.split().str.join("")
 
-    # Compute per-box metrics with apply (jiwer_cer list form returns aggregate, not per-row)
-    box_df["cer"] = box_df.apply(
-        lambda r: jiwer_cer(normalize_for_cer(r["gt_text"]), normalize_for_cer(r["ocr_text"])), axis=1
-    )
-    box_df["d_ocr_spacer"] = box_df.apply(
-        lambda r: spacer(Counter(normalize_for_cer(r["gt_text"])), Counter(normalize_for_cer(r["ocr_text"]))), axis=1
-    )
-    box_df["d_ocr_cdd"] = box_df.apply(
-        lambda r: cdd_decomp({"gt": normalize_for_cer(r["gt_text"]), "ocr": normalize_for_cer(r["ocr_text"])}).d_ocr,
-        axis=1,
-    )
+        # Merge GT text with OCR text on (page, ssu_id)
+        box_df = _gt_text_df.merge(
+            _ocr[["page", "ssu_id", "ocr_model", "ocr_text"]],
+            on=["page", "ssu_id"],
+        )
+        box_df["gt_len"] = box_df["gt_text"].str.len()
+
+        # Compute per-box metrics with apply (jiwer_cer list form returns aggregate, not per-row)
+        box_df["cer"] = box_df.apply(
+            lambda r: jiwer_cer(normalize_for_cer(r["gt_text"]), normalize_for_cer(r["ocr_text"])), axis=1
+        )
+        box_df["d_ocr_spacer"] = box_df.apply(
+            lambda r: spacer(Counter(normalize_for_cer(r["gt_text"])), Counter(normalize_for_cer(r["ocr_text"]))), axis=1
+        )
+        box_df["d_ocr_cdd"] = box_df.apply(
+            lambda r: cdd_decomp({"gt": normalize_for_cer(r["gt_text"]), "ocr": normalize_for_cer(r["ocr_text"])}).d_ocr,
+            axis=1,
+        )
+
+        _BOX_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        box_df.to_parquet(_BOX_CACHE, index=False)
+        print(f"Computed and cached box-level comparison: {len(box_df):,} rows -> {_BOX_CACHE}")
 
     _plt2 = (
         p9.ggplot(box_df, p9.aes(x="cer", y="d_ocr_spacer"))
@@ -925,6 +970,7 @@ def _(bold_best_cols, box_df, display_name, latex_table, mo, pd, spearmanr):
         .set_index("ocr_model")
         .rename(index=display_name)
     )
+    _corr_df.index.name = "OCR Model"
 
     latex_table(
         bold_best_cols(_corr_df, higher_cols=["SpACER $\\rho$", "CDD $\\rho$"]),

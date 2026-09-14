@@ -164,5 +164,11 @@ def _(corr_df, p9):
     return (corr_long,)
 
 
+@app.cell
+def _(corr_long):
+    corr_long.groupby('metric')['correlation'].mean()
+    return
+
+
 if __name__ == "__main__":
     app.run()

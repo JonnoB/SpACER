@@ -289,7 +289,8 @@ def _(Q, R, RUNS, S, S_star, cdd_decomp, jsd_distance, mo, pd, spacer_decomp):
       can push SpACER above 1.
     - JSD is purely distributional: T×2 vs T×1 in R_1 shifts the distribution,
       but a hallucinated B with equal total mass shifts it more. SpACER responds
-      directly to the absolute count difference via Ê and penalises deletions via D.
+      directly to the absolute count difference via Ê and penalises net deletions
+      and net insertions via D and I.
     - S_1_1 vs S_1_2 shows two OCR models on the same parsed boxes: S_1_2
       hallucinates a B, raising both JSD and SpACER d_total while d_pars is identical.
     """
