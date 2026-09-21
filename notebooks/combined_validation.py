@@ -68,128 +68,22 @@ def _():
     import plotnine as p9
     from scipy.stats import spearmanr
 
-    return Path, p9, pd, spearmanr
+    from spacer_analysis.names import display_name
+    from spacer_analysis.paths import DATASET_ORDER, DATASETS, REPO_ROOT
+    from spacer_analysis.tables import bold_best_cols, latex_table
 
-
-@app.cell
-def _(Path):
-    REPO_ROOT = Path(__file__).resolve().parent.parent
-
-    # Display order for all tables/figures.
-    DATASET_ORDER = ["spiritualist", "hiertext", "docbank"]
-
-    DATASETS = {
-        "spiritualist": dict(
-            box="data/spiritualist/box_level_ocr_comparison.parquet",
-            decomp="data/spiritualist/decomposition_results.parquet",
-            cote="data/spiritualist/cote_score_cache.parquet",
-            page_level="data/results_spiritualist/page_level_cer_comparison.parquet",
-            gt_bboxes="data/spiritualist/gt_ssu_bboxes.csv",
-        ),
-        "hiertext": dict(
-            box="data/hiertext/box_level_ocr_comparison.parquet",
-            decomp="data/hiertext/decomposition_results.parquet",
-            cote="data/hiertext/cote_score_cache.parquet",
-            page_level="data/hiertext/page_level_cer_comparison.parquet",
-            gt_bboxes="data/hiertext/gt_ssu_bboxes.csv",
-        ),
-        "docbank": dict(
-            box="data/docbank/box_level_ocr_comparison.parquet",
-            decomp="data/docbank/decomposition_results.parquet",
-            cote="data/docbank/cote_score_cache.parquet",
-            page_level="data/docbank/page_level_cer_comparison.parquet",
-            gt_bboxes="data/docbank/gt_ssu_bboxes.csv",
-        ),
-    }
-    return DATASETS, DATASET_ORDER, REPO_ROOT
-
-
-@app.cell
-def _():
-    # Model display names: lowercase + strip underscores -> display label.
-    _MODEL_DISPLAY_NAMES = {
-        # OCR models
-        "trocr":      "TrOCR",
-        "paddleocr":  "PaddleOCR",
-        "tesseract":  "Tesseract",
-        "craft":      "CRAFT",
-        "easyocr":    "EasyOCR",
-        # Parsing models
-        "heron":      "Heron",
-        "ppdocl":     "PPDoc-L",
-        "ppdocm":     "PPDoc-M",
-        "ppdocs":     "PPDoc-S",
-        "yolo":       "YOLO",
-    }
-
-    def display_name(name: str) -> str:
-        lower = name.lower().replace("_", "")
-        return _MODEL_DISPLAY_NAMES.get(lower, name.replace("_", "-").title())
-
-    return (display_name,)
-
-
-@app.cell
-def _():
-    """LaTeX formatting helpers for ML-paper tables."""
-
-    def bold_best_cols(df, lower_cols=None, higher_cols=None):
-        """Bold the best value per column (i.e. best model for that dataset).
-
-        lower_cols: column names where lower is better.
-        higher_cols: column names where higher is better.
-        """
-        lower_cols = lower_cols or []
-        higher_cols = higher_cols or []
-        result = df.copy().astype(object)
-        for col in df.columns:
-            best = df[col].min() if col in lower_cols else df[col].max()
-            for idx in df.index:
-                val = df.loc[idx, col]
-                s = f"{val:.3f}"
-                result.loc[idx, col] = f"\\textbf{{{s}}}" if val == best else s
-        return result
-
-    def latex_table(df, caption, label, col_fmt=None):
-        """Print a centered, bold-header booktabs LaTeX table (position=htbp).
-
-        The index is folded into the header row as a plain leading column
-        (rather than pandas's default separate index-name row) to match a
-        single-header-row style: \\textbf{Row} & \\textbf{Col1} & ... .
-        """
-        _df = df.reset_index()
-        col_fmt = col_fmt or ("l" + "c" * (_df.shape[1] - 1))
-        _headers = [r"\textbf{{" + str(c) + "}}" for c in _df.columns]
-        kwargs = dict(
-            index=False,
-            header=_headers,
-            caption=caption,
-            label=label,
-            escape=False,
-            position="htbp",
-            column_format=col_fmt,
-            float_format="%.3f",
-        )
-        _hline_count = 0
-        _lines = []
-        for _line in _df.to_latex(**kwargs).split("\n"):
-            _stripped = _line.strip()
-            if _stripped.startswith(r"\begin{table}"):
-                _lines.append(_line)
-                _lines.append(r"\centering")
-            elif _stripped == r"\hline":
-                _hline_count += 1
-                _lines.append(
-                    r"\toprule" if _hline_count == 1
-                    else r"\midrule" if _hline_count == 2
-                    else r"\bottomrule"
-                )
-            else:
-                _lines.append(_line)
-        print("\n".join(_lines))
-
-    return bold_best_cols, latex_table
-
+    return (
+        DATASETS,
+        DATASET_ORDER,
+        Path,
+        REPO_ROOT,
+        bold_best_cols,
+        display_name,
+        latex_table,
+        p9,
+        pd,
+        spearmanr,
+    )
 
 @app.cell
 def _(DATASETS, DATASET_ORDER, REPO_ROOT, pd):
@@ -202,16 +96,11 @@ def _(DATASETS, DATASET_ORDER, REPO_ROOT, pd):
     regions are polygons (`polygon_points` column present); DocBank's are
     axis-aligned bounding boxes (no `polygon_points` column).
     """
-    _DATASET_DISPLAY_NAMES = {
-        "spiritualist": "Spiritualist",
-        "hiertext": "HierText",
-        "docbank": "DocBank",
-    }
     _rows = {}
     for _name in DATASET_ORDER:
-        _gt_df = pd.read_csv(REPO_ROOT / DATASETS[_name]["gt_bboxes"])
+        _gt_df = pd.read_csv(DATASETS[_name].gt_ssu_bboxes)
         _text = _gt_df["gt_text"].fillna("").astype(str)
-        _rows[_DATASET_DISPLAY_NAMES[_name]] = pd.Series({
+        _rows[DATASETS[_name].display] = pd.Series({
             "Regions": len(_gt_df),
             "Words": _text.str.split().str.len().sum(),
             "Characters": _text.str.len().sum(),
@@ -252,7 +141,7 @@ def _(DATASETS, DATASET_ORDER, REPO_ROOT, display_name, pd, spearmanr):
     _spacer_cols = {}
     _cdd_cols = {}
     for _name in DATASET_ORDER:
-        _box_df = pd.read_parquet(REPO_ROOT / DATASETS[_name]["box"])
+        _box_df = pd.read_parquet(DATASETS[_name].box_level)
         _spacer_vals, _cdd_vals = {}, {}
         for _om, _grp in _box_df.groupby("ocr_model"):
             _r_sp, _ = spearmanr(_grp["cer"], _grp["d_ocr_spacer"])
@@ -262,8 +151,9 @@ def _(DATASETS, DATASET_ORDER, REPO_ROOT, display_name, pd, spearmanr):
         _spacer_cols[_name] = pd.Series(_spacer_vals)
         _cdd_cols[_name] = pd.Series(_cdd_vals)
 
-    cer_docr_spacer_table = pd.DataFrame(_spacer_cols)[DATASET_ORDER]
-    cer_docr_cdd_table = pd.DataFrame(_cdd_cols)[DATASET_ORDER]
+    _display = {_n: DATASETS[_n].display for _n in DATASET_ORDER}
+    cer_docr_spacer_table = pd.DataFrame(_spacer_cols)[DATASET_ORDER].rename(columns=_display)
+    cer_docr_cdd_table = pd.DataFrame(_cdd_cols)[DATASET_ORDER].rename(columns=_display)
     cer_docr_spacer_table.index.name = "OCR Model"
     cer_docr_cdd_table.index.name = "OCR Model"
     return cer_docr_cdd_table, cer_docr_spacer_table
@@ -313,8 +203,8 @@ def _(DATASETS, DATASET_ORDER, REPO_ROOT, display_name, pd, spearmanr):
     _spacer_cols = {}
     _cdd_cols = {}
     for _name in DATASET_ORDER:
-        _cote_df = pd.read_parquet(REPO_ROOT / DATASETS[_name]["cote"])
-        _results_df = pd.read_parquet(REPO_ROOT / DATASETS[_name]["decomp"])
+        _cote_df = pd.read_parquet(DATASETS[_name].cote_cache)
+        _results_df = pd.read_parquet(DATASETS[_name].decomposition_results)
         _dpars = (
             _results_df[_results_df["parsing_model"] != "gt"]
             .groupby(["page", "parsing_model"])[["d_pars_spacer_macro", "d_pars_cdd"]]
@@ -331,8 +221,9 @@ def _(DATASETS, DATASET_ORDER, REPO_ROOT, display_name, pd, spearmanr):
         _spacer_cols[_name] = pd.Series(_spacer_vals)
         _cdd_cols[_name] = pd.Series(_cdd_vals)
 
-    dpars_cote_spacer_table = pd.DataFrame(_spacer_cols)[DATASET_ORDER]
-    dpars_cote_cdd_table = pd.DataFrame(_cdd_cols)[DATASET_ORDER]
+    _display = {_n: DATASETS[_n].display for _n in DATASET_ORDER}
+    dpars_cote_spacer_table = pd.DataFrame(_spacer_cols)[DATASET_ORDER].rename(columns=_display)
+    dpars_cote_cdd_table = pd.DataFrame(_cdd_cols)[DATASET_ORDER].rename(columns=_display)
     dpars_cote_spacer_table.index.name = "Parsing Model"
     dpars_cote_cdd_table.index.name = "Parsing Model"
     return dpars_cote_cdd_table, dpars_cote_spacer_table
@@ -387,8 +278,8 @@ def _(DATASETS, DATASET_ORDER, REPO_ROOT, pd):
     _cdd_rows = {}
     _n_rows = {}
     for _name in DATASET_ORDER:
-        _cote_df = pd.read_parquet(REPO_ROOT / DATASETS[_name]["cote"])
-        _page_df = pd.read_parquet(REPO_ROOT / DATASETS[_name]["page_level"])
+        _cote_df = pd.read_parquet(DATASETS[_name].cote_cache)
+        _page_df = pd.read_parquet(DATASETS[_name].page_level)
         _merged = (
             _page_df[_page_df["parsing_model"] != "gt"]
             .merge(_cote_df[["page", "parsing_model", "cote"]], on=["page", "parsing_model"])
@@ -410,9 +301,10 @@ def _(DATASETS, DATASET_ORDER, REPO_ROOT, pd):
         _n_rows[_name] = pd.Series({_label: len(_part) for _label, _part in _groups.items()})
 
     _col_order = ["Pooled", "COTe < 0.5", "COTe ≥ 0.5"]
-    cote_conditioned_spacer_table = pd.DataFrame(_spacer_rows).T[_col_order].loc[DATASET_ORDER]
-    cote_conditioned_cdd_table = pd.DataFrame(_cdd_rows).T[_col_order].loc[DATASET_ORDER]
-    cote_conditioned_n_table = pd.DataFrame(_n_rows).T[_col_order].loc[DATASET_ORDER]
+    _display = {_n: DATASETS[_n].display for _n in DATASET_ORDER}
+    cote_conditioned_spacer_table = pd.DataFrame(_spacer_rows).T[_col_order].loc[DATASET_ORDER].rename(index=_display)
+    cote_conditioned_cdd_table = pd.DataFrame(_cdd_rows).T[_col_order].loc[DATASET_ORDER].rename(index=_display)
+    cote_conditioned_n_table = pd.DataFrame(_n_rows).T[_col_order].loc[DATASET_ORDER].rename(index=_display)
     cote_conditioned_spacer_table.index.name = "Dataset"
     cote_conditioned_cdd_table.index.name = "Dataset"
     cote_conditioned_n_table.index.name = "Dataset"
@@ -471,7 +363,7 @@ def _(DATASETS, DATASET_ORDER, REPO_ROOT, display_name, pd):
     """
     _records = []
     for _name in DATASET_ORDER:
-        _page_df = pd.read_parquet(REPO_ROOT / DATASETS[_name]["page_level"])
+        _page_df = pd.read_parquet(DATASETS[_name].page_level)
         _page_df = _page_df[_page_df["parsing_model"] != "gt"]
         _combos = _page_df[["parsing_model", "ocr_model"]].drop_duplicates()
         for _, _row in _combos.iterrows():

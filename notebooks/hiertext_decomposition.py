@@ -30,143 +30,64 @@ def _():
     import pandas as pd
     from collections import Counter
     from cotescore._distributions import build_R_spatial
-    from cotescore import RegionChars, GTBoxes, cdd_decomp, cdd_decomp_spatial, spacer_decomp_spatial, cote_score
-
+    from cotescore import RegionChars, cdd_decomp, cdd_decomp_spatial, spacer_decomp_spatial
     from jiwer import cer as jiwer_cer
     from cotescore import spacer
     import plotnine as p9
-    import re
-    import unicodedata
+    from scipy.stats import spearmanr
+
+    from spacer_analysis.correlation import dpars_metric_spearman
+    from spacer_analysis.cote import COTE_LABELS, compute_cote_df, mean_cote_table
+    from spacer_analysis.data import load_dataset
+    from spacer_analysis.detection import detection_metrics, page_detection_metrics
+    from spacer_analysis.names import display_name
+    from spacer_analysis.tables import bold_best_cols, bold_best_pivot, latex_table
+    from spacer_analysis.text import normalize_for_cer
 
     return (
+        COTE_LABELS,
         Counter,
-        GTBoxes,
         Path,
         RegionChars,
+        bold_best_cols,
+        bold_best_pivot,
         build_R_spatial,
         cdd_decomp,
         cdd_decomp_spatial,
-        cote_score,
+        compute_cote_df,
+        detection_metrics,
+        display_name,
+        dpars_metric_spearman,
         jiwer_cer,
+        latex_table,
+        load_dataset,
+        mean_cote_table,
         mo,
+        normalize_for_cer,
         np,
         p9,
+        page_detection_metrics,
         pd,
-        re,
         spacer,
         spacer_decomp_spatial,
-        unicodedata,
+        spearmanr,
     )
 
 
 @app.cell
-def _(re, unicodedata):
-    def _normalize_quotes(text):
-        text = re.sub(r'[‘’‚‛‹›`]', "'", text)
-        text = re.sub(r'[“”„‟«»]', '"', text)
-        return text
-
-    def _normalize_dashes(text):
-        text = re.sub(r'[–—―‒]', '-', text)
-        return text
-
-    def normalize_for_cer(text):
-        text = text.lower()
-        text = unicodedata.normalize('NFKC', text)
-        text = _normalize_quotes(text)
-        text = _normalize_dashes(text)
-        text = text.replace('\xa0', ' ')
-        text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
-        text = re.sub(r' +', ' ', text)
-        return text.strip()
-
-    return (normalize_for_cer,)
-
-
-@app.cell
-def _(Path, pd):
-    _REPO_ROOT = Path(__file__).resolve().parent.parent
-    _CHARS_PATH = _REPO_ROOT / "data/hiertext/characters_inferred.parquet"
-    _OCR_DIR = _REPO_ROOT / "data/hiertext_results/ocr"
-    _BBOX_DIR = _REPO_ROOT / "data/hiertext_predictions"
-
-    chars_df = pd.read_parquet(_CHARS_PATH)
-    chars_df = chars_df[chars_df["char_text"] != " "].reset_index(drop=True)
-    chars_df["cx"] = (chars_df["x"] + chars_df["w"] / 2).astype(int)
-    chars_df["cy"] = (chars_df["y"] + chars_df["h"] / 2).astype(int)
-
-    # Load GT OCR parquets (parsing_model == "gt") into a single DataFrame.
-    # Filename pattern: hiertext_gt_predictions_{ocr_model}_ocr.parquet
-    # Schema: filename, ssu_id, ocr_text
-    _gt_parts = []
-    for _f in sorted(_OCR_DIR.glob("hiertext_gt_predictions_*_ocr.parquet")):
-        _om = _f.stem.removeprefix("hiertext_gt_predictions_").removesuffix("_ocr")
-        _part = pd.read_parquet(_f)
-        _part["ocr_model"] = _om
-        _gt_parts.append(_part)
-    gt_ocr_df = pd.concat(_gt_parts, ignore_index=True) if _gt_parts else pd.DataFrame()
-
-    # Load prediction OCR parquets (non-GT parsing models) into a single DataFrame.
-    # Filename pattern: hiertext_{parsing_model}_predictions_{ocr_model}_ocr.parquet
-    # Schema: filename, x, y, width, height, ocr_text
-    _pred_parts = []
-    for _f in sorted(_OCR_DIR.glob("*_ocr.parquet")):
-        _inner = _f.stem.removeprefix("hiertext_").removesuffix("_ocr")
-        _sep = _inner.index("_predictions_")
-        _pm = _inner[:_sep]
-        if _pm == "gt":
-            continue
-        _om = _inner[_sep + len("_predictions_"):]
-        _part = pd.read_parquet(_f)
-        _part["parsing_model"] = _pm
-        _part["ocr_model"] = _om
-        _pred_parts.append(_part)
-    pred_ocr_df = pd.concat(_pred_parts, ignore_index=True) if _pred_parts else pd.DataFrame()
-
-    # Load all bbox CSVs into a single DataFrame.
-    # Filename pattern: hiertext_{parsing_model}_predictions.csv
-    # Schema: filename, x, y, width, height
-    _bbox_parts = []
-    for _f in sorted(_BBOX_DIR.glob("*.csv")):
-        _pm = _f.stem.removeprefix("hiertext_").removesuffix("_predictions")
-        _part = pd.read_csv(_f)
-        _part["parsing_model"] = _pm
-        _bbox_parts.append(_part)
-    bbox_df = pd.concat(_bbox_parts, ignore_index=True)
-
-    # Non-gt prediction CSVs have the full GT box set concatenated in
-    # (source == "gt"); score only the real predictions. The gt-baseline
-    # file has no source column (NaN after concat), so it is preserved.
-    if "source" in bbox_df.columns:
-        bbox_df = bbox_df[bbox_df["source"] != "gt"].reset_index(drop=True)
-
-    parsing_models = sorted(bbox_df["parsing_model"].unique())
-    ocr_models = sorted(pred_ocr_df["ocr_model"].unique()) if not pred_ocr_df.empty else []
-    pages = sorted(chars_df["page_id"].unique())
-
-    # Model display names: lowercase + strip underscores → display label.
-    _MODEL_DISPLAY_NAMES = {
-        # OCR models
-        "trocr":      "TrOCR",
-        "paddleocr":  "PaddleOCR",
-        "tesseract":  "Tesseract",
-        "craft":      "CRAFT",
-        # Parsing models
-        "heron":      "Heron",
-        "ppdocl":     "PPDoc-L",
-        "ppdocm":     "PPDoc-M",
-        "ppdocs":     "PPDoc-S",
-        "yolo":       "YOLO",
-    }
-
-    def display_name(name: str) -> str:
-        lower = name.lower().replace("_", "")
-        return _MODEL_DISPLAY_NAMES.get(lower, name.replace("_", "-").title())
-
+def _(load_dataset):
+    """Inferred characters, OCR outputs and predicted boxes (see spacer_analysis.data / spacer_analysis.paths)."""
+    _ds = load_dataset("hiertext")
+    chars_df = _ds.chars_df
+    gt_ocr_df = _ds.gt_ocr_df
+    pred_ocr_df = _ds.pred_ocr_df
+    bbox_df = _ds.bbox_df
+    parsing_models = _ds.parsing_models
+    ocr_models = _ds.ocr_models
+    pages = _ds.pages
     return (
         bbox_df,
         chars_df,
-        display_name,
         gt_ocr_df,
         ocr_models,
         pages,
@@ -322,214 +243,66 @@ def _(
 
 
 @app.cell
-def _():
-    """LaTeX formatting helpers for ML-paper tables."""
-
-    def bold_best_cols(df, lower_cols=None, higher_cols=None):
-        """Bold the best value per column. Returns a string-valued DataFrame for escape=False output.
-
-        lower_cols: column names where lower is better.
-        higher_cols: column names where higher is better.
-        """
-        lower_cols = lower_cols or []
-        higher_cols = higher_cols or []
-        result = df.copy().astype(object)
-        for col in df.columns:
-            best = df[col].min() if col in lower_cols else df[col].max()
-            for idx in df.index:
-                val = df.loc[idx, col]
-                s = f"{val:.3f}"
-                result.loc[idx, col] = f"\\textbf{{{s}}}" if val == best else s
-        return result
-
-    def bold_best_pivot(df, lower_is_better=True):
-        """Bold column-best values; bold + $^*$ for the overall table best.
-
-        Intended for pivot tables (parsing_model rows × ocr_model columns).
-        """
-        fn = "min" if lower_is_better else "max"
-        col_best = getattr(df, fn)(axis=0)
-        table_best = float(getattr(df.values, fn)())
-        result = df.copy().astype(object)
-        for col in df.columns:
-            for idx in df.index:
-                val = df.loc[idx, col]
-                s = f"{val:.3f}"
-                if val == table_best:
-                    s = f"\\textbf{{{s}}}$^{{*}}$"
-                elif val == col_best[col]:
-                    s = f"\\textbf{{{s}}}"
-                result.loc[idx, col] = s
-        return result
-
-    def latex_table(df, caption, label, col_fmt=None):
-        """Print a booktabs LaTeX table (escape=False, position=t)."""
-        kwargs = dict(
-            caption=caption,
-            label=label,
-            escape=False,
-            position="t",
-            float_format="%.3f",
-        )
-        if col_fmt:
-            kwargs["column_format"] = col_fmt
-        # Replace \hline with booktabs rules (\toprule, \midrule, \bottomrule)
-        _hline_count = 0
-        _lines = []
-        for _line in df.to_latex(**kwargs).split("\n"):
-            if _line.strip() == r"\hline":
-                _hline_count += 1
-                _lines.append(
-                    r"\toprule" if _hline_count == 1
-                    else r"\midrule" if _hline_count == 2
-                    else r"\bottomrule"
-                )
-            else:
-                _lines.append(_line)
-        print("\n".join(_lines))
-
-    return bold_best_cols, bold_best_pivot, latex_table
+def _(bbox_df, detection_metrics, mo, page_detection_metrics, parsing_models):
+    """Single-class detection metrics vs the GT SSU boxes: COCO mAP, mAP@0.5,
+    F1@0.5 and mean matched IoU (see spacer_analysis.detection). page_det_df
+    holds the per-page F1 / IoU used for the correlation tables."""
+    page_det_df = page_detection_metrics("hiertext", bbox_df, parsing_models)
+    det_df = detection_metrics("hiertext", bbox_df, parsing_models, per_page=page_det_df)
+    mo.vstack([
+        mo.md("### Detection metrics (mAP, F1, IoU) by parsing model"),
+        mo.ui.table(det_df, selection=None),
+    ])
+    return det_df, page_det_df
 
 
 @app.cell
 def _(
-    GTBoxes,
-    Path,
+    COTE_LABELS,
     bbox_df,
     bold_best_cols,
-    cote_score,
+    compute_cote_df,
+    det_df,
     display_name,
     latex_table,
+    mean_cote_table,
     mo,
     parsing_models,
-    pd,
 ):
     """COTe score — Coverage, Overlap, Trespass, Excess per parsing model.
-    Uses cotescore's analytic bounding-box fast path (GTBoxes + an (M,4)
-    predicted-box array) instead of rasterizing GT/predictions onto a
-    max_dim=500 pixel canvas: exact rather than resolution-limited, and
-    ~3.5x faster on this dataset (see cotescore's test_cote_score_bbox.py
-    for the mask-mode agreement tests this relies on).
+
+    Per-page scores come from spacer_analysis.cote.compute_cote_df (cotescore's exact
+    bounding-box path, cached to the dataset's cote_score_cache.parquet so the
+    cross-dataset notebooks see the same numbers).
     """
-    _REPO_ROOT = Path(__file__).resolve().parent.parent
-    _GT_BBOXES_PATH = _REPO_ROOT / "data/hiertext/gt_ssu_bboxes.csv"
-    _COTE_CACHE_PATH = _REPO_ROOT / "data/hiertext/cote_score_cache.parquet"
-
-    if _COTE_CACHE_PATH.exists():
-        cote_df = pd.read_parquet(_COTE_CACHE_PATH)
-    else:
-        _gt_ssu_df = pd.read_csv(_GT_BBOXES_PATH)
-        _ssu_codes, _ = pd.factorize(_gt_ssu_df["ssu_id"])
-        _gt_ssu_df = _gt_ssu_df.copy()
-        _gt_ssu_df["ssu_int"] = _ssu_codes + 1
-        _cote_records = []
-        for _filename, _gt_page in _gt_ssu_df.groupby("filename"):
-            _page_id = Path(_filename).stem
-            _orig_w = int(_gt_page["image_width"].iloc[0])
-            _orig_h = int(_gt_page["image_height"].iloc[0])
-            _gt_boxes = GTBoxes(
-                boxes=_gt_page[["x", "y", "width", "height"]].to_numpy(dtype=float),
-                ssu_ids=_gt_page["ssu_int"].to_numpy(dtype=int),
-                image_width=_orig_w,
-                image_height=_orig_h,
-            )
-            for _pm in parsing_models:
-                _pred_page = bbox_df.loc[
-                    (bbox_df["parsing_model"] == _pm) &
-                    (bbox_df["filename"] == _filename)
-                ]
-                _preds = _pred_page[["x", "y", "width", "height"]].to_numpy(dtype=float)
-                _cote, _C, _O, _T, _E = cote_score(_gt_boxes, _preds)
-                _cote_records.append({
-                    "page": _page_id,
-                    "parsing_model": _pm,
-                    "cote": _cote,
-                    "coverage": _C,
-                    "overlap": _O,
-                    "trespass": _T,
-                    "excess": _E,
-                })
-        cote_df = pd.DataFrame(_cote_records)
-        _COTE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        cote_df.to_parquet(_COTE_CACHE_PATH)
-
+    cote_df = compute_cote_df("hiertext", bbox_df, parsing_models)
     # Keep raw index so d_pars cell can join on parsing_model names directly.
-    cote_table = (
-        cote_df[cote_df["parsing_model"] != "gt"]
-        .groupby("parsing_model")[["cote", "coverage", "overlap", "trespass", "excess"]]
-        .mean()
-        .round(2)
+    cote_table = mean_cote_table(cote_df)
+
+    _cote_display = (
+        cote_table.join(det_df.drop(columns="mAP@0.5")).rename(index=display_name).rename(columns=COTE_LABELS)
     )
-    _cote_display = cote_table.rename(index=display_name)
     latex_table(
         bold_best_cols(
             _cote_display,
-            higher_cols=["cote", "coverage"],
-            lower_cols=["overlap", "trespass", "excess"],
+            higher_cols=["COTe", "Coverage", "mAP",
+                         #"mAP@0.5", 
+                         "F1@0.5", 
+                         "IoU"],
+            lower_cols=["Overlap", "Trespass", "Excess"],
         ),
-        caption=r"COTe score and components by parsing model. "
-                r"Higher is better for COTe and Coverage; lower is better for Overlap, Trespass, Excess.",
+        caption=r"COTe score and components by parsing model, with single-class box-detection "
+                r"metrics against the GT SSUs: COCO mAP (IoU 0.50:0.05:0.95), mAP@0.5, "
+                r"page-macro F1@0.5, and mean IoU of matched boxes. "
+                r"Higher is better except for Overlap, Trespass and Excess.",
         label="tab:hiertext_cote",
     )
+
     mo.vstack([
         mo.md("### COTe score — mean by parsing model"),
         mo.ui.table(_cote_display, selection=None),
     ])
     return cote_df, cote_table
-
-
-@app.cell
-def _(Path, bbox_df, mo, np, parsing_models, pd):
-    """mAP@0.5 — single-class object detection mAP per parsing model."""
-
-    def _iou_matrix(pred_boxes, gt_boxes):
-        def _to_xyxy(b):
-            return np.column_stack([b[:, 0], b[:, 1], b[:, 0] + b[:, 2], b[:, 1] + b[:, 3]])
-        p = _to_xyxy(pred_boxes)
-        g = _to_xyxy(gt_boxes)
-        inter_x1 = np.maximum(p[:, None, 0], g[None, :, 0])
-        inter_y1 = np.maximum(p[:, None, 1], g[None, :, 1])
-        inter_x2 = np.minimum(p[:, None, 2], g[None, :, 2])
-        inter_y2 = np.minimum(p[:, None, 3], g[None, :, 3])
-        inter = np.maximum(0, inter_x2 - inter_x1) * np.maximum(0, inter_y2 - inter_y1)
-        area_p = (p[:, 2] - p[:, 0]) * (p[:, 3] - p[:, 1])
-        area_g = (g[:, 2] - g[:, 0]) * (g[:, 3] - g[:, 1])
-        union = area_p[:, None] + area_g[None, :] - inter
-        return np.where(union > 0, inter / union, 0.0)
-
-    _REPO_ROOT = Path(__file__).resolve().parent.parent
-    _gt_ssu_df = pd.read_csv(_REPO_ROOT / "data/hiertext/gt_ssu_bboxes.csv")
-
-    _map_records = []
-    for _pm in [pm for pm in parsing_models if pm != "gt"]:
-        _ap_per_page = []
-        for _filename, _gt_page in _gt_ssu_df.groupby("filename"):
-            _gt_boxes = _gt_page[["x", "y", "width", "height"]].values.astype(float)
-            _pred_page = bbox_df.loc[
-                (bbox_df["parsing_model"] == _pm) &
-                (bbox_df["filename"] == _filename)
-            ]
-            if len(_pred_page) == 0:
-                _ap_per_page.append(0.0)
-                continue
-            _pred_boxes = _pred_page[["x", "y", "width", "height"]].values.astype(float)
-            _iou = _iou_matrix(_pred_boxes, _gt_boxes)
-            _matched_gt = set()
-            _tp = 0
-            for _pi in np.argsort(-_iou.max(axis=1)):
-                _gi = int(_iou[_pi].argmax())
-                if _iou[_pi, _gi] >= 0.5 and _gi not in _matched_gt:
-                    _tp += 1
-                    _matched_gt.add(_gi)
-            _fp = len(_pred_boxes) - _tp
-            _fn = len(_gt_boxes) - _tp
-            _denom = _tp + _fp + _fn
-            _ap_per_page.append(_tp / _denom if _denom > 0 else 0.0)
-        _map_records.append({"parsing_model": _pm, "mAP@0.5": round(float(np.mean(_ap_per_page)), 4)})
-
-    map_df = pd.DataFrame(_map_records).set_index("parsing_model")
-    mo.vstack([mo.md("### mAP@0.5 by parsing model"), mo.ui.table(map_df, selection=None)])
-    return (map_df,)
 
 
 @app.cell
@@ -576,18 +349,10 @@ def _(bold_best_cols, box_df, display_name, latex_table, mo, results_df):
 
 
 @app.cell
-def _(
-    bold_best_cols,
-    cote_table,
-    display_name,
-    latex_table,
-    map_df,
-    mo,
-    results_df,
-):
+def _(bold_best_cols, cote_table, display_name, latex_table, mo, results_df):
     """d_pars — median per parsing model (independent of OCR model).
 
-    Also joins COTe total score and mAP@0.5.
+    Also joins COTe total score.
     """
     d_pars_table = (
         results_df[results_df["parsing_model"] != "gt"]
@@ -599,7 +364,6 @@ def _(
         })
         # Join on raw parsing_model names before renaming index
         .join(cote_table[["cote"]].rename(columns={"cote": "COTe"}))
-        .join(map_df[["mAP@0.5"]])
         .rename(index=display_name)
         .round(4)
     )
@@ -608,10 +372,10 @@ def _(
         bold_best_cols(
             d_pars_table,
             lower_cols=["SpACER macro", "CDD"],
-            higher_cols=["COTe", "mAP@0.5"],
+            higher_cols=["COTe"],
         ),
-        caption=r"Parsing error ($d_\text{pars}$) by parsing model with COTe and mAP@0.5. "
-                r"SpACER macro is the primary metric; lower is better for SpACER/CDD, higher for COTe/mAP.",
+        caption=r"Parsing error ($d_\text{pars}$) by parsing model with COTe. "
+                r"SpACER macro is the primary metric; lower is better for SpACER/CDD, higher for COTe.",
         label="tab:hiertext_d_pars",
     )
 
@@ -719,56 +483,39 @@ def _(cote_df, mo, p9, results_df):
 
 
 @app.cell
-def _(bold_best_cols, cote_df, display_name, latex_table, mo, pd, results_df):
-    """Spearman correlation between per-page d_pars (SpACER & CDD) and COTe score."""
-    from scipy.stats import spearmanr
-
-    # Per-page d_pars for both metrics; d_pars is ocr_model-independent so average across it
-    _dpars = (
-        results_df[results_df["parsing_model"] != "gt"]
-        .groupby(["page", "parsing_model"])[["d_pars_spacer_macro", "d_pars_cdd"]]
-        .mean()
-        .reset_index()
-        .merge(cote_df[["page", "parsing_model", "cote"]], on=["page", "parsing_model"])
-    )
-
-    _records = []
-    for _pm, _grp in _dpars.groupby("parsing_model"):
-        _r_sp, _p_sp = spearmanr(_grp["cote"], _grp["d_pars_spacer_macro"])
-        _r_cdd, _p_cdd = spearmanr(_grp["cote"], _grp["d_pars_cdd"])
-        _records.append({
-            "parsing_model": _pm,
-            "SpACER $\\rho$": round(_r_sp, 3),
-            "CDD $\\rho$": round(_r_cdd, 3),
-        })
-
-    _corr_df = (
-        pd.DataFrame(_records)
-        .set_index("parsing_model")
-        .rename(index=display_name)
-    )
-
-    latex_table(
-        bold_best_cols(_corr_df, lower_cols=["SpACER $\\rho$", "CDD $\\rho$"]),
-        caption=r"Spearman correlation ($\rho$) between per-page $d_\text{pars}$ "
-                r"and COTe score by parsing model. Negative $\rho$ indicates that "
-                r"higher COTe (better parsing geometry) corresponds to lower parsing error, "
-                r"as expected.",
-        label="tab:hiertext_dpars_cote_spearman",
-    )
-
-    _lines = ["**Spearman correlation: d_pars vs COTe**\n"]
-    for _, _row in _corr_df.iterrows():
-        _lines.append(
-            f"- **{_}**: SpACER ρ = {_row['SpACER $\\rho$']:.3f}, "
-            f"CDD ρ = {_row['CDD $\\rho$']:.3f}"
+def _(
+    bold_best_cols,
+    cote_df,
+    display_name,
+    dpars_metric_spearman,
+    latex_table,
+    mo,
+    page_det_df,
+    results_df,
+):
+    """Spearman correlation between per-page d_pars (SpACER, then CDD) and each
+    per-page layout metric: COTe, F1@0.5, IoU. mAP is a corpus-level ranking
+    metric with no per-page value, so it is not included (see
+    spacer_analysis.correlation)."""
+    _corr = dpars_metric_spearman(results_df, cote_df, page_det_df)
+    _tables = {}
+    for _err, _err_label in [("spacer", "SpACER"), ("cdd", "CDD")]:
+        _tbl = _corr[_err].rename(index=display_name)
+        _tables[_err_label] = _tbl
+        latex_table(
+            bold_best_cols(_tbl, lower_cols=list(_tbl.columns)),
+            caption=rf"HierText spearman correlation ($\rho$) between per-page $d_\text{{pars}}$ ({_err_label}) "
+                    r"and per-page layout metrics (COTe, F1@0.5, mean matched IoU) by parsing model. "
+                    r"Negative $\rho$ indicates that a better layout score corresponds to lower "
+                    r"parsing error, as expected. ``--'': undefined (metric constant across pages).",
+            label=f"tab:hiertext_dpars_metrics_spearman_{_err}",
         )
 
     mo.vstack([
-        mo.md("\n".join(_lines)),
-        mo.ui.table(_corr_df, selection=None),
+        mo.md("### Spearman $\\rho$: $d_\\text{pars}$ vs COTe / F1@0.5 / IoU"),
+        *[mo.vstack([mo.md(f"**{_k}**"), mo.ui.table(_v, selection=None)]) for _k, _v in _tables.items()],
     ])
-    return (spearmanr,)
+    return
 
 
 @app.cell

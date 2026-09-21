@@ -19,6 +19,9 @@ dependencies = [
     "lxml>=6.0.2",
     "python-dotenv>=1.2.2",
     "cotescore",
+    "jiwer>=4.0.0",
+    "scikit-learn>=1.7.2",
+    "seaborn>=0.13.2",
 ]
 
 [project.optional-dependencies]
@@ -29,7 +32,7 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = []
+packages = ["spacer_analysis"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

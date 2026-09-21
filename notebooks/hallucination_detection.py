@@ -15,30 +15,8 @@ def _():
     from cotescore import spacer, cdd_decomp
     from jiwer import cer as jiwer_cer
     import plotnine as p9
-    import unicodedata
-    import re
 
-    def normalize_quotes(text):
-        # Single quotes / apostrophes
-        text = re.sub(r'[\u2018\u2019\u201a\u201b\u2039\u203a`]', "'", text)
-        # Double quotes
-        text = re.sub(r'[\u201c\u201d\u201e\u201f\u00ab\u00bb]', '"', text)
-        return text
-
-    def normalize_dashes(text):
-        text = re.sub(r'[\u2013\u2014\u2015\u2012]', '-', text)  # en/em dashes
-        return text
-
-    def normalize_for_cer(text):
-        text = text.lower()
-        text = unicodedata.normalize('NFKC', text)
-        text = normalize_quotes(text)
-        text = normalize_dashes(text)
-        text = text.replace('\xa0', ' ')
-        text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
-        text = re.sub(r' +', ' ', text)
-        text = text.strip()
-        return text
+    from spacer_analysis.text import normalize_for_cer
     return (
         Counter,
         Path,

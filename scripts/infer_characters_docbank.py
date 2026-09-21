@@ -13,7 +13,8 @@ document order, so values line up with the ssu_id column in
 data/docbank/gt_ssu_bboxes.csv.
 
 Input:  data/docbank/gt_word_annotations/*.txt
-        data/docbank/mscoco_annotations_subset.json (page pixel dimensions)
+        data/docbank/gt_ssu_bboxes.csv (page pixel dimensions; falls back to
+        data/docbank/mscoco_annotations_subset.json if the csv is absent)
 Output: data/docbank/characters_inferred.parquet
 Columns: char_id, page_id, char_text, x, y, w, h, ssu_id
 """
@@ -25,9 +26,24 @@ from pathlib import Path
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from scripts.extract_docbank_ssu_text import GT_DIR, MSCOCO_PATH, group_into_ssu_runs, parse_word_line
+from scripts.extract_docbank_ssu_text import (
+    GT_DIR, MSCOCO_PATH, OUTPUT as SSU_CSV_PATH, group_into_ssu_runs, parse_word_line,
+)
 
 OUTPUT_PATH = Path("data/docbank/characters_inferred.parquet")
+
+
+def load_image_dims() -> dict[str, tuple[int, int]]:
+    """filename -> (width_px, height_px). Prefer gt_ssu_bboxes.csv, which already
+    carries the page dims and is the file the ssu_ids here must line up with;
+    the MSCOCO subset is only needed if that csv hasn't been generated."""
+    if SSU_CSV_PATH.exists():
+        print(f"Loading page dims from {SSU_CSV_PATH} ...")
+        dims = pd.read_csv(SSU_CSV_PATH, usecols=["filename", "image_width", "image_height"]).drop_duplicates("filename")
+        return {r.filename: (int(r.image_width), int(r.image_height)) for r in dims.itertuples()}
+    print(f"Loading page dims from {MSCOCO_PATH} ...")
+    coco = json.loads(MSCOCO_PATH.read_text())
+    return {img["file_name"]: (img["width"], img["height"]) for img in coco["images"]}
 
 
 def infer_characters_from_word(
@@ -60,9 +76,7 @@ def infer_characters_from_word(
 
 
 def main() -> None:
-    print(f"Loading {MSCOCO_PATH} ...")
-    coco = json.loads(MSCOCO_PATH.read_text())
-    image_dims = {img["file_name"]: (img["width"], img["height"]) for img in coco["images"]}
+    image_dims = load_image_dims()
 
     txt_files = sorted(GT_DIR.glob("*.txt"))
     print(f"  {len(txt_files):,} gt word-annotation files in {GT_DIR}")
@@ -90,7 +104,7 @@ def main() -> None:
                 )
 
     if skipped:
-        print(f"  Skipped {skipped:,} pages not present in {MSCOCO_PATH}")
+        print(f"  Skipped {skipped:,} pages with no known image dimensions")
 
     df = pd.DataFrame(
         all_records,
